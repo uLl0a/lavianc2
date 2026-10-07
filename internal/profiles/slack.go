@@ -1,0 +1,35 @@
+package profiles
+
+var SlackProfile = &Profile{
+	Name:      "slack",
+	UserAgent: "Slack/4.32.127 Chrome/112.0.5615.165 Electron/24.2.0 Safari/537.36",
+	Host:      "slack.com",
+	URIs: []string{
+		"/api/conversations.list",
+		"/api/conversations.history",
+		"/api/chat.postMessage",
+		"/api/users.list",
+		"/api/files.list",
+		"/api/search.messages",
+		"/api/reactions.add",
+		"/api/pins.add",
+	},
+	Headers: map[string]string{
+		"Accept":          "application/json",
+		"Accept-Language": "en-US,en;q=0.9",
+		"Accept-Encoding": "gzip, deflate, br",
+		"Connection":      "keep-alive",
+		"Cache-Control":   "no-cache",
+		"Pragma":          "no-cache",
+		//"Authorization":             "Bearer xoxb-0000000000-0000000000-000000000000000000000000000000000000000000000000",
+		"X-Slack-Request-Id":        "",
+		"X-Slack-Req-Id":            "",
+		"Sec-Fetch-Dest":            "empty",
+		"Sec-Fetch-Mode":            "cors",
+		"Sec-Fetch-Site":            "same-origin",
+		"Upgrade-Insecure-Requests": "1",
+	},
+	Padding:      true,
+	PaddingRange: [2]int{16, 128},
+	Jitter:       15,
+}

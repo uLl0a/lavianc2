@@ -1,0 +1,188 @@
+syntax = "proto3";
+
+package admin.v1;
+
+option go_package = "github.com/uLl0a/lavianc2/gen/admin/v1;adminv1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+service AdminService {
+  // ---- Operadores ----
+  rpc CreateOperator(CreateOperatorRequest) returns (Operator);
+  rpc ListOperators(google.protobuf.Empty) returns (ListOperatorsResponse);
+
+  // ---- Listeners ----
+  rpc CreateListener(CreateListenerRequest) returns (Listener);
+  rpc ListListeners(google.protobuf.Empty) returns (ListListenersResponse);
+
+  // ---- Implantes ----
+  rpc ListImplants(google.protobuf.Empty) returns (ListImplantsResponse);
+  rpc GetImplant(GetImplantRequest) returns (Implant);
+  rpc KillImplant(KillImplantRequest) returns (google.protobuf.Empty);
+
+  // ---- Tareas ----
+  rpc SubmitTask(SubmitTaskRequest) returns (Task);
+  rpc StreamTaskEvents(StreamTaskEventsRequest) returns (stream TaskEvent);
+
+  // ---- Auditoría ----
+  rpc StreamAudit(StreamAuditRequest) returns (stream AuditEvent);
+
+  // ---- Build dinámico ----
+  rpc BuildImplant(BuildImplantRequest) returns (BuildImplantResponse);
+  
+  // ---- Perfiles maleables ----
+  rpc ListHTTPProfiles(google.protobuf.Empty) returns (ListHTTPProfilesResponse);
+  rpc ListDNSProfiles(google.protobuf.Empty) returns (ListDNSProfilesResponse);
+}
+
+message Operator {
+  string id = 1;
+  string username = 2;
+  string role = 3;
+  string status = 4;
+  google.protobuf.Timestamp created_at = 5;
+}
+
+message CreateOperatorRequest {
+  string username = 1;
+  string password = 2;
+  string role = 3; // "admin", "operator", "viewer"
+}
+
+message ListOperatorsResponse {
+  repeated Operator operators = 1;
+}
+
+message Listener {
+  string id = 1;
+  string name = 2;
+  string type = 3; // "https", "dns", "mtls", "http"
+  string bind_addr = 4;
+  int32  port = 5;
+  string domain = 6;
+  bool   active = 7;
+  google.protobuf.Timestamp created_at = 8;
+}
+
+message CreateListenerRequest {
+  string name = 1;
+  string type = 2;
+  string bind_addr = 3;
+  int32  port = 4;
+  string domain = 5;
+}
+
+message ListListenersResponse {
+  repeated Listener listeners = 1;
+}
+
+message Implant {
+  string id = 1;
+  string session_key = 2;
+  string hostname = 3;
+  string username = 4;
+  string os = 5;
+  string arch = 6;
+  int32  pid = 7;
+  string process_name = 8;
+  string internal_ip = 9;
+  string external_ip = 10;
+  string listener_id = 11;
+  string status = 12; // "alive", "sleeping", "dead", "killed"
+  int32  sleep_interval = 13;
+  int32  jitter = 14;
+  google.protobuf.Timestamp first_seen = 15;
+  google.protobuf.Timestamp last_check_in = 16;
+}
+
+message ListImplantsResponse {
+  repeated Implant implants = 1;
+}
+
+message GetImplantRequest {
+  string id = 1;
+}
+
+message KillImplantRequest {
+  string id = 1;
+}
+
+message Task {
+  string id = 1;
+  string implant_id = 2;
+  string operator_id = 3;
+  string command = 4;
+  repeated string args = 5;
+  string status = 6; // "pending", "sent", "running", "completed", "failed"
+  bytes  payload = 7;
+  bytes  output = 8;
+  string error = 9;
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp dispatched_at = 11;
+  google.protobuf.Timestamp completed_at = 12;
+}
+
+message SubmitTaskRequest {
+  string implant_id = 1;
+  string command = 2;
+  repeated string args = 3;
+  bytes  payload = 4;
+}
+
+message StreamTaskEventsRequest {
+  string implant_id = 1;
+}
+
+message TaskEvent {
+  string task_id = 1;
+  string status = 2;
+  bytes  output = 3;
+  string error = 4;
+  google.protobuf.Timestamp at = 5;
+}
+
+message StreamAuditRequest {
+  string category = 1; // filtro opcional por categoría
+}
+
+message AuditEvent {
+  string id = 1;
+  string level = 2;    // "debug", "info", "warn", "error"
+  string category = 3; // "auth", "task", "implant", "listener"
+  string message = 4;
+  google.protobuf.Timestamp at = 5;
+}
+
+message BuildImplantRequest {
+  string listener_url = 1;   // ej: "https://c2.example.com/api/v1/envelope"
+  string profile_name = 2;   // ej: "office365"
+  string target_os = 3;      // "windows", "linux", "darwin"
+  string target_arch = 4;    // "amd64", "arm64", "386"
+  string format = 5;         // "exe", "dll", "shellcode", "elf", "macho"
+  int32  sleep_secs = 6;
+  int32  jitter_perc = 7;
+  bool   obfuscate = 8;
+  bool   compress = 9;
+}
+
+message BuildImplantResponse {
+  string build_id = 1;
+  string output_path = 2;
+  int64  size_bytes = 3;
+  int64  duration_ms = 4;
+}
+
+message ProfileInfo {
+  string name = 1;
+  string transport = 2; // "http" | "dns"
+  string description = 3;
+}
+
+message ListHTTPProfilesResponse {
+  repeated ProfileInfo profiles = 1;
+}
+
+message ListDNSProfilesResponse {
+  repeated ProfileInfo profiles = 1;
+}
