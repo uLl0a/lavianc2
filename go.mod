@@ -6,6 +6,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/miekg/dns v1.1.73
+	github.com/quic-go/quic-go v0.63.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/crypto v0.57.0
 	google.golang.org/grpc v1.84.0

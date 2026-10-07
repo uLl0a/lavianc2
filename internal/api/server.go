@@ -49,12 +49,13 @@ type Config struct {
 	KeyFile  string
 	CAFile   string
 
-	Store       *storage.Store
-	Engine      *tasks.Engine
-	Bus         *events.Bus
-	Profiles    *profiles.Registry
-	DNSProfiles *profiles.DNSRegistry
-	ServerKeys  *crypto.ServerKeyStore
+	Store        *storage.Store
+	Engine       *tasks.Engine
+	Bus          *events.Bus
+	Profiles     *profiles.Registry
+	DNSProfiles  *profiles.DNSRegistry
+	QUICProfiles *profiles.QUICRegistry
+	ServerKeys   *crypto.ServerKeyStore
 
 	RepoRoot string
 }
@@ -116,6 +117,7 @@ func NewServer(cfg Config, log *slog.Logger) (*Server, error) {
 		cfg.Bus,
 		cfg.Profiles,
 		cfg.DNSProfiles,
+		cfg.QUICProfiles,
 		cfg.ServerKeys,
 		cfg.RepoRoot,
 		cfg.CAFile,
@@ -326,6 +328,7 @@ var methodRequirements = map[string]string{
 	"/admin.v1.AdminService/ListListeners":    "viewer",
 	"/admin.v1.AdminService/ListHTTPProfiles": "viewer",
 	"/admin.v1.AdminService/ListDNSProfiles":  "viewer",
+	"/admin.v1.AdminService/ListQUICProfiles": "viewer",
 	"/admin.v1.AdminService/StreamTaskEvents": "viewer",
 	"/admin.v1.AdminService/StreamAudit":      "viewer",
 }

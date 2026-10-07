@@ -33,6 +33,7 @@ const (
 	AdminService_BuildImplant_FullMethodName     = "/admin.v1.AdminService/BuildImplant"
 	AdminService_ListHTTPProfiles_FullMethodName = "/admin.v1.AdminService/ListHTTPProfiles"
 	AdminService_ListDNSProfiles_FullMethodName  = "/admin.v1.AdminService/ListDNSProfiles"
+	AdminService_ListQUICProfiles_FullMethodName = "/admin.v1.AdminService/ListQUICProfiles"
 )
 
 // AdminServiceClient is the client API for AdminService service.
@@ -59,6 +60,7 @@ type AdminServiceClient interface {
 	// ---- Perfiles maleables ----
 	ListHTTPProfiles(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*ListHTTPProfilesResponse, error)
 	ListDNSProfiles(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*ListDNSProfilesResponse, error)
+	ListQUICProfiles(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*ListQUICProfilesResponse, error)
 }
 
 type adminServiceClient struct {
@@ -217,6 +219,16 @@ func (c *adminServiceClient) ListDNSProfiles(ctx context.Context, in *emptypb.Em
 	return out, nil
 }
 
+func (c *adminServiceClient) ListQUICProfiles(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*ListQUICProfilesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListQUICProfilesResponse)
+	err := c.cc.Invoke(ctx, AdminService_ListQUICProfiles_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AdminServiceServer is the server API for AdminService service.
 // All implementations must embed UnimplementedAdminServiceServer
 // for forward compatibility.
@@ -241,6 +253,7 @@ type AdminServiceServer interface {
 	// ---- Perfiles maleables ----
 	ListHTTPProfiles(context.Context, *emptypb.Empty) (*ListHTTPProfilesResponse, error)
 	ListDNSProfiles(context.Context, *emptypb.Empty) (*ListDNSProfilesResponse, error)
+	ListQUICProfiles(context.Context, *emptypb.Empty) (*ListQUICProfilesResponse, error)
 	mustEmbedUnimplementedAdminServiceServer()
 }
 
@@ -289,6 +302,9 @@ func (UnimplementedAdminServiceServer) ListHTTPProfiles(context.Context, *emptyp
 }
 func (UnimplementedAdminServiceServer) ListDNSProfiles(context.Context, *emptypb.Empty) (*ListDNSProfilesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListDNSProfiles not implemented")
+}
+func (UnimplementedAdminServiceServer) ListQUICProfiles(context.Context, *emptypb.Empty) (*ListQUICProfilesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListQUICProfiles not implemented")
 }
 func (UnimplementedAdminServiceServer) mustEmbedUnimplementedAdminServiceServer() {}
 func (UnimplementedAdminServiceServer) testEmbeddedByValue()                      {}
@@ -531,6 +547,24 @@ func _AdminService_ListDNSProfiles_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AdminService_ListQUICProfiles_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(emptypb.Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AdminServiceServer).ListQUICProfiles(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AdminService_ListQUICProfiles_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AdminServiceServer).ListQUICProfiles(ctx, req.(*emptypb.Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AdminService_ServiceDesc is the grpc.ServiceDesc for AdminService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -581,6 +615,10 @@ var AdminService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListDNSProfiles",
 			Handler:    _AdminService_ListDNSProfiles_Handler,
+		},
+		{
+			MethodName: "ListQUICProfiles",
+			Handler:    _AdminService_ListQUICProfiles_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

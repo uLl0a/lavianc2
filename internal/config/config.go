@@ -34,6 +34,13 @@ type Config struct {
 
 	// Nivel de log: "debug", "info", "warn", "error".
 	LogLevel string
+
+	// Dirección donde escucha el listener QUIC del C2.
+	// Ej: ":8443" (mismo puerto que HTTPS, pero UDP)
+	QUICAddr string
+
+	// Perfil QUIC por defecto (ej: "quic-h3").
+	QUICProfile string
 }
 
 func Load() Config {
@@ -47,6 +54,8 @@ func Load() Config {
 		DNSAddr:     getenv("RTC2_DNS_ADDR", ":5353"),
 		DNSDomain:   getenv("RTC2_DNS_DOMAIN", "c2.example.com"),
 		LogLevel:    getenv("RTC2_LOG", "info"),
+		QUICAddr:    getenv("RTC2_QUIC_ADDR", ":8443"), // UDP
+		QUICProfile: getenv("RTC2_QUIC_PROFILE", "quic-h3"),
 	}
 }
 

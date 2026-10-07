@@ -33,6 +33,7 @@ const (
 	ListenerDNS   ListenerType = "dns"
 	ListenerMTLS  ListenerType = "mtls"
 	ListenerHTTP  ListenerType = "http"
+	ListenerQUIC  ListenerType = "quic"
 )
 
 // Listener es un endpoint de C2 que recibe check-ins de implantes.

@@ -34,6 +34,7 @@ service AdminService {
   // ---- Perfiles maleables ----
   rpc ListHTTPProfiles(google.protobuf.Empty) returns (ListHTTPProfilesResponse);
   rpc ListDNSProfiles(google.protobuf.Empty) returns (ListDNSProfilesResponse);
+  rpc ListQUICProfiles(google.protobuf.Empty) returns (ListQUICProfilesResponse); 
 }
 
 message Operator {
@@ -184,5 +185,9 @@ message ListHTTPProfilesResponse {
 }
 
 message ListDNSProfilesResponse {
+  repeated ProfileInfo profiles = 1;
+}
+
+message ListQUICProfilesResponse {
   repeated ProfileInfo profiles = 1;
 }

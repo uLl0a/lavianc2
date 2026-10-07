@@ -75,6 +75,9 @@ func main() {
 	dnsProfilesRegistry := profiles.NewDNSRegistry()
 	log.Info("perfiles DNS cargados", "perfiles", dnsProfilesRegistry.List())
 
+	quicProfilesRegistry := profiles.NewQUICRegistry()
+	log.Info("perfiles QUIC cargados", "perfiles", quicProfilesRegistry.List())
+
 	httpsID, err := ensureDefaultListener(
 		ctx, store,
 		"default-https",
@@ -149,6 +152,46 @@ func main() {
 	}()
 	log.Info("listener DNS activo", "addr", cfg.DNSAddr, "domain", cfg.DNSDomain, "id", dnsID)
 
+	// ---- QUIC listener ----
+	quicID, err := ensureDefaultListener(
+		ctx, store,
+		"default-quic",
+		models.ListenerQUIC,
+		cfg.QUICAddr,
+		"",
+		log,
+	)
+	if err != nil {
+		log.Error("no se pudo asegurar listener QUIC en DB", "err", err)
+		os.Exit(1)
+	}
+
+	quicListener, err := listeners.NewQUICListener(
+		quicID,
+		"default-quic",
+		cfg.QUICAddr,
+		store,
+		registry,
+		bus,
+		serverKeys,
+		quicProfilesRegistry,
+		cfg.QUICProfile,
+		cfg.TLSCertFile,
+		cfg.TLSKeyFile,
+		log,
+	)
+	if err != nil {
+		log.Error("no se pudo crear listener QUIC", "err", err)
+		os.Exit(1)
+	}
+	quicCtx, quicCancel := context.WithCancel(ctx)
+	go func() {
+		if err := quicListener.Start(quicCtx); err != nil {
+			log.Error("QUIC listener detenido", "err", err)
+		}
+	}()
+	log.Info("listener QUIC activo", "addr", cfg.QUICAddr, "id", quicID)
+
 	// ---- gRPC admin API ----
 	apiServer, err := api.NewServer(api.Config{
 		Addr:     cfg.GRPCAddr,
@@ -156,13 +199,14 @@ func main() {
 		KeyFile:  cfg.TLSKeyFile,
 		CAFile:   cfg.CAFile,
 
-		Store:       store,
-		Engine:      engine,
-		Bus:         bus,
-		Profiles:    profilesRegistry,
-		DNSProfiles: dnsProfilesRegistry,
-		ServerKeys:  serverKeys,
-		RepoRoot:    ".",
+		Store:        store,
+		Engine:       engine,
+		Bus:          bus,
+		Profiles:     profilesRegistry,
+		DNSProfiles:  dnsProfilesRegistry,
+		QUICProfiles: quicProfilesRegistry,
+		ServerKeys:   serverKeys,
+		RepoRoot:     ".",
 	}, log)
 	if err != nil {
 		log.Error("no se pudo crear gRPC server", "err", err)
@@ -189,6 +233,10 @@ func main() {
 
 	_ = httpsListener.Stop(shutdownCtx)
 	log.Info("listener HTTPS detenido")
+
+	quicCancel()
+	_ = quicListener.Stop(shutdownCtx)
+	log.Info("listener QUIC detenido")
 
 	apiServer.Stop()
 	log.Info("gRPC admin API detenida")

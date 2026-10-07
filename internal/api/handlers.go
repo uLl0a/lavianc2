@@ -23,14 +23,15 @@ import (
 
 type adminService struct {
 	adminv1.UnimplementedAdminServiceServer
-	store       *storage.Store
-	engine      *tasks.Engine
-	bus         *events.Bus
-	profiles    *profiles.Registry
-	dnsProfiles *profiles.DNSRegistry
-	serverKeys  *crypto.ServerKeyStore
-	repoRoot    string
-	caFile      string
+	store        *storage.Store
+	engine       *tasks.Engine
+	bus          *events.Bus
+	profiles     *profiles.Registry
+	dnsProfiles  *profiles.DNSRegistry
+	quicProfiles *profiles.QUICRegistry
+	serverKeys   *crypto.ServerKeyStore
+	repoRoot     string
+	caFile       string
 }
 
 func NewAdminService(
@@ -39,19 +40,21 @@ func NewAdminService(
 	bus *events.Bus,
 	profiles *profiles.Registry,
 	dnsProfiles *profiles.DNSRegistry,
+	quicProfiles *profiles.QUICRegistry,
 	serverKeys *crypto.ServerKeyStore,
 	repoRoot string,
 	caFile string,
 ) *adminService {
 	return &adminService{
-		store:       store,
-		engine:      engine,
-		bus:         bus,
-		profiles:    profiles,
-		dnsProfiles: dnsProfiles,
-		serverKeys:  serverKeys,
-		repoRoot:    repoRoot,
-		caFile:      caFile,
+		store:        store,
+		engine:       engine,
+		bus:          bus,
+		profiles:     profiles,
+		dnsProfiles:  dnsProfiles,
+		quicProfiles: quicProfiles,
+		serverKeys:   serverKeys,
+		repoRoot:     repoRoot,
+		caFile:       caFile,
 	}
 }
 
@@ -325,6 +328,23 @@ func (s *adminService) ListDNSProfiles(ctx context.Context, _ *emptypb.Empty) (*
 			Name:        p.Name,
 			Transport:   "dns",
 			Description: fmt.Sprintf("Domain=%s, Encoding=%s, Record=%s", p.Domain, p.Encoding, p.RecordType),
+		})
+	}
+	return resp, nil
+}
+
+func (s *adminService) ListQUICProfiles(ctx context.Context, _ *emptypb.Empty) (*adminv1.ListQUICProfilesResponse, error) {
+	names := s.quicProfiles.List()
+	resp := &adminv1.ListQUICProfilesResponse{}
+	for _, name := range names {
+		p, err := s.quicProfiles.Get(name)
+		if err != nil {
+			continue
+		}
+		resp.Profiles = append(resp.Profiles, &adminv1.ProfileInfo{
+			Name:        p.Name,
+			Transport:   "quic",
+			Description: fmt.Sprintf("ALPN=%v, MaxIdle=%s", p.ALPN, p.MaxIdleTimeout),
 		})
 	}
 	return resp, nil

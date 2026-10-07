@@ -49,6 +49,12 @@ func (s *adminService) BuildImplant(
 			return nil, status.Errorf(codes.InvalidArgument,
 				"perfil DNS %q no encontrado: %v", req.ProfileName, err)
 		}
+
+	case "quic":
+		if _, err := s.quicProfiles.Get(req.ProfileName); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument,
+				"perfil QUIC %q no encontrado: %v", req.ProfileName, err)
+		}
 	default:
 		return nil, status.Errorf(codes.InvalidArgument,
 			"esquema %q no soportado (usa http://, https:// o dns://)", u.Scheme)
@@ -159,6 +165,14 @@ func validateListenerURL(raw string) error {
 		}
 		if !strings.Contains(u.Host, ":") {
 			return errors.New("DNS requiere puerto explícito (ej: dns://1.2.3.4:53)")
+		}
+
+	case "quic":
+		if u.Host == "" {
+			return fmt.Errorf("falta host (ej: quic://1.2.3.4:8443)")
+		}
+		if !strings.Contains(u.Host, ":") {
+			return fmt.Errorf("QUIC requiere puerto explícito (ej: quic://1.2.3.4:8443)")
 		}
 	default:
 		return fmt.Errorf("esquema %q no soportado", u.Scheme)

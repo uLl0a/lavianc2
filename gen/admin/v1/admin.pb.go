@@ -1483,6 +1483,50 @@ func (x *ListDNSProfilesResponse) GetProfiles() []*ProfileInfo {
 	return nil
 }
 
+type ListQUICProfilesResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Profiles      []*ProfileInfo         `protobuf:"bytes,1,rep,name=profiles,proto3" json:"profiles,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListQUICProfilesResponse) Reset() {
+	*x = ListQUICProfilesResponse{}
+	mi := &file_admin_v1_admin_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListQUICProfilesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListQUICProfilesResponse) ProtoMessage() {}
+
+func (x *ListQUICProfilesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_admin_v1_admin_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListQUICProfilesResponse.ProtoReflect.Descriptor instead.
+func (*ListQUICProfilesResponse) Descriptor() ([]byte, []int) {
+	return file_admin_v1_admin_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *ListQUICProfilesResponse) GetProfiles() []*ProfileInfo {
+	if x != nil {
+		return x.Profiles
+	}
+	return nil
+}
+
 var File_admin_v1_admin_proto protoreflect.FileDescriptor
 
 const file_admin_v1_admin_proto_rawDesc = "" +
@@ -1617,7 +1661,9 @@ const file_admin_v1_admin_proto_rawDesc = "" +
 	"\x18ListHTTPProfilesResponse\x121\n" +
 	"\bprofiles\x18\x01 \x03(\v2\x15.admin.v1.ProfileInfoR\bprofiles\"L\n" +
 	"\x17ListDNSProfilesResponse\x121\n" +
-	"\bprofiles\x18\x01 \x03(\v2\x15.admin.v1.ProfileInfoR\bprofiles2\xb6\a\n" +
+	"\bprofiles\x18\x01 \x03(\v2\x15.admin.v1.ProfileInfoR\bprofiles\"M\n" +
+	"\x18ListQUICProfilesResponse\x121\n" +
+	"\bprofiles\x18\x01 \x03(\v2\x15.admin.v1.ProfileInfoR\bprofiles2\x86\b\n" +
 	"\fAdminService\x12E\n" +
 	"\x0eCreateOperator\x12\x1f.admin.v1.CreateOperatorRequest\x1a\x12.admin.v1.Operator\x12H\n" +
 	"\rListOperators\x12\x16.google.protobuf.Empty\x1a\x1f.admin.v1.ListOperatorsResponse\x12E\n" +
@@ -1633,7 +1679,8 @@ const file_admin_v1_admin_proto_rawDesc = "" +
 	"\vStreamAudit\x12\x1c.admin.v1.StreamAuditRequest\x1a\x14.admin.v1.AuditEvent0\x01\x12M\n" +
 	"\fBuildImplant\x12\x1d.admin.v1.BuildImplantRequest\x1a\x1e.admin.v1.BuildImplantResponse\x12N\n" +
 	"\x10ListHTTPProfiles\x12\x16.google.protobuf.Empty\x1a\".admin.v1.ListHTTPProfilesResponse\x12L\n" +
-	"\x0fListDNSProfiles\x12\x16.google.protobuf.Empty\x1a!.admin.v1.ListDNSProfilesResponseB0Z.github.com/uLl0a/lavianc2/gen/admin/v1;adminv1b\x06proto3"
+	"\x0fListDNSProfiles\x12\x16.google.protobuf.Empty\x1a!.admin.v1.ListDNSProfilesResponse\x12N\n" +
+	"\x10ListQUICProfiles\x12\x16.google.protobuf.Empty\x1a\".admin.v1.ListQUICProfilesResponseB0Z.github.com/uLl0a/lavianc2/gen/admin/v1;adminv1b\x06proto3"
 
 var (
 	file_admin_v1_admin_proto_rawDescOnce sync.Once
@@ -1647,7 +1694,7 @@ func file_admin_v1_admin_proto_rawDescGZIP() []byte {
 	return file_admin_v1_admin_proto_rawDescData
 }
 
-var file_admin_v1_admin_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_admin_v1_admin_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_admin_v1_admin_proto_goTypes = []any{
 	(*Operator)(nil),                 // 0: admin.v1.Operator
 	(*CreateOperatorRequest)(nil),    // 1: admin.v1.CreateOperatorRequest
@@ -1670,55 +1717,59 @@ var file_admin_v1_admin_proto_goTypes = []any{
 	(*ProfileInfo)(nil),              // 18: admin.v1.ProfileInfo
 	(*ListHTTPProfilesResponse)(nil), // 19: admin.v1.ListHTTPProfilesResponse
 	(*ListDNSProfilesResponse)(nil),  // 20: admin.v1.ListDNSProfilesResponse
-	(*timestamppb.Timestamp)(nil),    // 21: google.protobuf.Timestamp
-	(*emptypb.Empty)(nil),            // 22: google.protobuf.Empty
+	(*ListQUICProfilesResponse)(nil), // 21: admin.v1.ListQUICProfilesResponse
+	(*timestamppb.Timestamp)(nil),    // 22: google.protobuf.Timestamp
+	(*emptypb.Empty)(nil),            // 23: google.protobuf.Empty
 }
 var file_admin_v1_admin_proto_depIdxs = []int32{
-	21, // 0: admin.v1.Operator.created_at:type_name -> google.protobuf.Timestamp
+	22, // 0: admin.v1.Operator.created_at:type_name -> google.protobuf.Timestamp
 	0,  // 1: admin.v1.ListOperatorsResponse.operators:type_name -> admin.v1.Operator
-	21, // 2: admin.v1.Listener.created_at:type_name -> google.protobuf.Timestamp
+	22, // 2: admin.v1.Listener.created_at:type_name -> google.protobuf.Timestamp
 	3,  // 3: admin.v1.ListListenersResponse.listeners:type_name -> admin.v1.Listener
-	21, // 4: admin.v1.Implant.first_seen:type_name -> google.protobuf.Timestamp
-	21, // 5: admin.v1.Implant.last_check_in:type_name -> google.protobuf.Timestamp
+	22, // 4: admin.v1.Implant.first_seen:type_name -> google.protobuf.Timestamp
+	22, // 5: admin.v1.Implant.last_check_in:type_name -> google.protobuf.Timestamp
 	6,  // 6: admin.v1.ListImplantsResponse.implants:type_name -> admin.v1.Implant
-	21, // 7: admin.v1.Task.created_at:type_name -> google.protobuf.Timestamp
-	21, // 8: admin.v1.Task.dispatched_at:type_name -> google.protobuf.Timestamp
-	21, // 9: admin.v1.Task.completed_at:type_name -> google.protobuf.Timestamp
-	21, // 10: admin.v1.TaskEvent.at:type_name -> google.protobuf.Timestamp
-	21, // 11: admin.v1.AuditEvent.at:type_name -> google.protobuf.Timestamp
+	22, // 7: admin.v1.Task.created_at:type_name -> google.protobuf.Timestamp
+	22, // 8: admin.v1.Task.dispatched_at:type_name -> google.protobuf.Timestamp
+	22, // 9: admin.v1.Task.completed_at:type_name -> google.protobuf.Timestamp
+	22, // 10: admin.v1.TaskEvent.at:type_name -> google.protobuf.Timestamp
+	22, // 11: admin.v1.AuditEvent.at:type_name -> google.protobuf.Timestamp
 	18, // 12: admin.v1.ListHTTPProfilesResponse.profiles:type_name -> admin.v1.ProfileInfo
 	18, // 13: admin.v1.ListDNSProfilesResponse.profiles:type_name -> admin.v1.ProfileInfo
-	1,  // 14: admin.v1.AdminService.CreateOperator:input_type -> admin.v1.CreateOperatorRequest
-	22, // 15: admin.v1.AdminService.ListOperators:input_type -> google.protobuf.Empty
-	4,  // 16: admin.v1.AdminService.CreateListener:input_type -> admin.v1.CreateListenerRequest
-	22, // 17: admin.v1.AdminService.ListListeners:input_type -> google.protobuf.Empty
-	22, // 18: admin.v1.AdminService.ListImplants:input_type -> google.protobuf.Empty
-	8,  // 19: admin.v1.AdminService.GetImplant:input_type -> admin.v1.GetImplantRequest
-	9,  // 20: admin.v1.AdminService.KillImplant:input_type -> admin.v1.KillImplantRequest
-	11, // 21: admin.v1.AdminService.SubmitTask:input_type -> admin.v1.SubmitTaskRequest
-	12, // 22: admin.v1.AdminService.StreamTaskEvents:input_type -> admin.v1.StreamTaskEventsRequest
-	14, // 23: admin.v1.AdminService.StreamAudit:input_type -> admin.v1.StreamAuditRequest
-	16, // 24: admin.v1.AdminService.BuildImplant:input_type -> admin.v1.BuildImplantRequest
-	22, // 25: admin.v1.AdminService.ListHTTPProfiles:input_type -> google.protobuf.Empty
-	22, // 26: admin.v1.AdminService.ListDNSProfiles:input_type -> google.protobuf.Empty
-	0,  // 27: admin.v1.AdminService.CreateOperator:output_type -> admin.v1.Operator
-	2,  // 28: admin.v1.AdminService.ListOperators:output_type -> admin.v1.ListOperatorsResponse
-	3,  // 29: admin.v1.AdminService.CreateListener:output_type -> admin.v1.Listener
-	5,  // 30: admin.v1.AdminService.ListListeners:output_type -> admin.v1.ListListenersResponse
-	7,  // 31: admin.v1.AdminService.ListImplants:output_type -> admin.v1.ListImplantsResponse
-	6,  // 32: admin.v1.AdminService.GetImplant:output_type -> admin.v1.Implant
-	22, // 33: admin.v1.AdminService.KillImplant:output_type -> google.protobuf.Empty
-	10, // 34: admin.v1.AdminService.SubmitTask:output_type -> admin.v1.Task
-	13, // 35: admin.v1.AdminService.StreamTaskEvents:output_type -> admin.v1.TaskEvent
-	15, // 36: admin.v1.AdminService.StreamAudit:output_type -> admin.v1.AuditEvent
-	17, // 37: admin.v1.AdminService.BuildImplant:output_type -> admin.v1.BuildImplantResponse
-	19, // 38: admin.v1.AdminService.ListHTTPProfiles:output_type -> admin.v1.ListHTTPProfilesResponse
-	20, // 39: admin.v1.AdminService.ListDNSProfiles:output_type -> admin.v1.ListDNSProfilesResponse
-	27, // [27:40] is the sub-list for method output_type
-	14, // [14:27] is the sub-list for method input_type
-	14, // [14:14] is the sub-list for extension type_name
-	14, // [14:14] is the sub-list for extension extendee
-	0,  // [0:14] is the sub-list for field type_name
+	18, // 14: admin.v1.ListQUICProfilesResponse.profiles:type_name -> admin.v1.ProfileInfo
+	1,  // 15: admin.v1.AdminService.CreateOperator:input_type -> admin.v1.CreateOperatorRequest
+	23, // 16: admin.v1.AdminService.ListOperators:input_type -> google.protobuf.Empty
+	4,  // 17: admin.v1.AdminService.CreateListener:input_type -> admin.v1.CreateListenerRequest
+	23, // 18: admin.v1.AdminService.ListListeners:input_type -> google.protobuf.Empty
+	23, // 19: admin.v1.AdminService.ListImplants:input_type -> google.protobuf.Empty
+	8,  // 20: admin.v1.AdminService.GetImplant:input_type -> admin.v1.GetImplantRequest
+	9,  // 21: admin.v1.AdminService.KillImplant:input_type -> admin.v1.KillImplantRequest
+	11, // 22: admin.v1.AdminService.SubmitTask:input_type -> admin.v1.SubmitTaskRequest
+	12, // 23: admin.v1.AdminService.StreamTaskEvents:input_type -> admin.v1.StreamTaskEventsRequest
+	14, // 24: admin.v1.AdminService.StreamAudit:input_type -> admin.v1.StreamAuditRequest
+	16, // 25: admin.v1.AdminService.BuildImplant:input_type -> admin.v1.BuildImplantRequest
+	23, // 26: admin.v1.AdminService.ListHTTPProfiles:input_type -> google.protobuf.Empty
+	23, // 27: admin.v1.AdminService.ListDNSProfiles:input_type -> google.protobuf.Empty
+	23, // 28: admin.v1.AdminService.ListQUICProfiles:input_type -> google.protobuf.Empty
+	0,  // 29: admin.v1.AdminService.CreateOperator:output_type -> admin.v1.Operator
+	2,  // 30: admin.v1.AdminService.ListOperators:output_type -> admin.v1.ListOperatorsResponse
+	3,  // 31: admin.v1.AdminService.CreateListener:output_type -> admin.v1.Listener
+	5,  // 32: admin.v1.AdminService.ListListeners:output_type -> admin.v1.ListListenersResponse
+	7,  // 33: admin.v1.AdminService.ListImplants:output_type -> admin.v1.ListImplantsResponse
+	6,  // 34: admin.v1.AdminService.GetImplant:output_type -> admin.v1.Implant
+	23, // 35: admin.v1.AdminService.KillImplant:output_type -> google.protobuf.Empty
+	10, // 36: admin.v1.AdminService.SubmitTask:output_type -> admin.v1.Task
+	13, // 37: admin.v1.AdminService.StreamTaskEvents:output_type -> admin.v1.TaskEvent
+	15, // 38: admin.v1.AdminService.StreamAudit:output_type -> admin.v1.AuditEvent
+	17, // 39: admin.v1.AdminService.BuildImplant:output_type -> admin.v1.BuildImplantResponse
+	19, // 40: admin.v1.AdminService.ListHTTPProfiles:output_type -> admin.v1.ListHTTPProfilesResponse
+	20, // 41: admin.v1.AdminService.ListDNSProfiles:output_type -> admin.v1.ListDNSProfilesResponse
+	21, // 42: admin.v1.AdminService.ListQUICProfiles:output_type -> admin.v1.ListQUICProfilesResponse
+	29, // [29:43] is the sub-list for method output_type
+	15, // [15:29] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_admin_v1_admin_proto_init() }
@@ -1732,7 +1783,7 @@ func file_admin_v1_admin_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_admin_v1_admin_proto_rawDesc), len(file_admin_v1_admin_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   21,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
