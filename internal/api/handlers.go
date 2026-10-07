@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -241,15 +242,30 @@ func (s *adminService) StreamTaskEvents(req *adminv1.StreamTaskEventsRequest, st
 }
 
 func (s *adminService) StreamAudit(req *adminv1.StreamAuditRequest, stream adminv1.AdminService_StreamAuditServer) error {
-	// Suscripción a todos los eventos de auditoría
+	wantCategory := req.Category
+
 	eventsCh := make(chan *adminv1.AuditEvent, 128)
 
-	// En producción, el bus tendría un topic "audit.*" con wildcard.
-	// Simplificación: suscribirse a varios topics.
-	topics := []events.Topic{events.TopicOperatorAction, events.TopicImplantCheckin, events.TopicTaskCreated}
+	topics := []events.Topic{
+		events.TopicOperatorAction,
+		events.TopicImplantCheckin,
+		events.TopicImplantDead,
+		events.TopicTaskCreated,
+		events.TopicTaskCompleted,
+		events.TopicListenerEvent,
+	}
+
 	unsubs := make([]func(), 0, len(topics))
 	for _, topic := range topics {
+		topic := topic // captura por valor para la clausura
 		unsub := s.bus.Subscribe(topic, func(ctx context.Context, ev events.Event) {
+			if wantCategory != "" {
+				topicStr := string(ev.Topic)
+				if !strings.HasPrefix(topicStr, wantCategory) {
+					return
+				}
+			}
+
 			select {
 			case eventsCh <- &adminv1.AuditEvent{
 				Level:    "info",
