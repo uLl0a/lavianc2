@@ -49,6 +49,7 @@ type Config struct {
 	CertFile string
 	KeyFile  string
 	CAFile   string
+	WSAddr   string
 
 	Store        *storage.Store
 	Engine       *tasks.Engine
@@ -124,6 +125,7 @@ func NewServer(cfg Config, log *slog.Logger) (*Server, error) {
 		cfg.BeaconMgr,
 		cfg.RepoRoot,
 		cfg.CAFile,
+		cfg.WSAddr,
 	)
 	adminv1.RegisterAdminServiceServer(grpcServer, adminSvc)
 
@@ -336,18 +338,18 @@ var methodRequirements = map[string]string{
 	"/admin.v1.AdminService/StreamAudit":      "viewer",
 
 	// Multi-Beacon Manager
-	"/admin.v1.AdminService/ListBeacons":     "viewer",
-	"/admin.v1.AdminService/GetBeacon":       "viewer",
+	"/admin.v1.AdminService/ListBeacons":      "viewer",
+	"/admin.v1.AdminService/GetBeacon":        "viewer",
 	"/admin.v1.AdminService/ListBeaconGroups": "viewer",
 
 	// Operator-or-higher: control y payloads dinámicos
-	"/admin.v1.AdminService/RegisterBeacon":      "operator",
-	"/admin.v1.AdminService/SetBeaconProfile":    "operator",
-	"/admin.v1.AdminService/StartBeacon":         "operator",
-	"/admin.v1.AdminService/StopBeacon":          "operator",
+	"/admin.v1.AdminService/RegisterBeacon":       "operator",
+	"/admin.v1.AdminService/SetBeaconProfile":     "operator",
+	"/admin.v1.AdminService/StartBeacon":          "operator",
+	"/admin.v1.AdminService/StopBeacon":           "operator",
 	"/admin.v1.AdminService/SubmitDynamicPayload": "operator",
-	"/admin.v1.AdminService/OpenTunnel":          "operator",
-	"/admin.v1.AdminService/CloseTunnel":         "operator",
+	"/admin.v1.AdminService/OpenTunnel":           "operator",
+	"/admin.v1.AdminService/CloseTunnel":          "operator",
 
 	// Admin-only: gestión de grupos
 	"/admin.v1.AdminService/CreateBeaconGroup": "admin",

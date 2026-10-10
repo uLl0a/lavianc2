@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -71,7 +72,7 @@ func (s *adminService) BuildImplant(
 		TargetArch:      builder.TargetArch(req.TargetArch),
 		Format:          builder.OutputFormat(req.Format),
 		ListenerURL:     req.ListenerUrl,
-		WSURL:           deriveWSURL(req.ListenerUrl),
+		WSURL:           deriveWSURL(req.ListenerUrl, s.wsAddr),
 		ProfileName:     req.ProfileName,
 		ServerPubKey:    s.serverKeys.PublicKeyBase64(),
 		CACertPEMBase64: caB64,
@@ -181,15 +182,25 @@ func validateListenerURL(raw string) error {
 	return nil
 }
 
-// deriveWSURL construye la URL del túnel WebSocket a partir del ListenerURL
-// del build: mismo host, esquema wss, y el puerto/path del listener WS.
-// Por defecto asume el listener WS en el puerto 9444 con path /ws/tunnel.
-func deriveWSURL(listenerURL string) string {
+// deriveWSURL construye la URL del túnel WebSocket a partir del
+// ListenerURL del build y la dirección del WS listener del server.
+//
+//	wsAddr: ":9444" → puerto 9444 en el mismo host que el ListenerURL
+//	wsAddr: "0.0.0.0:9444" → puerto 9444 en el mismo host
+//	wsAddr: "" → default 9444
+func deriveWSURL(listenerURL, wsAddr string) string {
 	u, err := url.Parse(listenerURL)
 	if err != nil || u.Host == "" {
 		return ""
 	}
 	host := u.Hostname()
-	ws := &url.URL{Scheme: "wss", Host: host + ":9444", Path: "/ws/tunnel"}
+
+	// Extraer puerto de wsAddr.
+	_, port, err := net.SplitHostPort(wsAddr)
+	if err != nil || port == "" {
+		port = "9444" // default
+	}
+
+	ws := &url.URL{Scheme: "wss", Host: host + ":" + port, Path: "/ws/tunnel"}
 	return ws.String()
 }

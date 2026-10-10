@@ -251,6 +251,7 @@ func main() {
 		CertFile: cfg.TLSCertFile,
 		KeyFile:  cfg.TLSKeyFile,
 		CAFile:   cfg.CAFile,
+		WSAddr:   cfg.WSAddr,
 
 		Store:        store,
 		Engine:       engine,

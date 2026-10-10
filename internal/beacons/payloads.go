@@ -34,10 +34,32 @@ func ParsePayloadKind(s string) (PayloadKind, error) {
 	}
 }
 
+// payloadInteractivity clasifica cada PayloadKind según si requiere un
+// beacon interactivo (short-haul) o puede despacharse a uno de
+// supervivencia (long-haul).
+//
+// Un payload interactivo se caracteriza por:
+//   - Consumir mucha CPU/RAM/red durante la ejecución
+//   - Requerir latencia baja para ser útil (túneles gráficos)
+//   - Tener un ciclo de vida corto pero intenso
+//
+// Un payload NO interactivo podría ser: descarga de un chunk de archivo,
+// ping de latencia, heartbeat, etc.
+var payloadInteractivity = map[PayloadKind]bool{
+	PayloadBOF:      true, // ejecución pesada in-process
+	PayloadAssembly: true, // hosting CLR fork-and-run
+	PayloadHVNC:     true, // túnel gráfico de latencia baja
+}
+
 // EsInteractivo indica si el tipo exige un beacon de perfil interactivo.
+//
+// Por defecto devuelve false: cualquier PayloadKind nuevo que no esté
+// explícitamente en payloadInteractivity se considerará NO interactivo.
+// Es la opción conservadora: si te olvidas de clasificar un payload nuevo,
+// el manager lo rechazará en beacons long-haul en lugar de aceptarlo
+// silenciosamente.
 func (k PayloadKind) EsInteractivo() bool {
-	// BOF, .NET y hVNC son cargas pesadas/túneles: solo Short-Haul.
-	return true
+	return payloadInteractivity[k]
 }
 
 // AssignPayload es el motor de validación de enrutamiento de cargas.
@@ -69,9 +91,9 @@ func AssignPayload(b *Beacon, kind PayloadKind) error {
 type TunnelState string
 
 const (
-	TunnelNone     TunnelState = "none"
-	TunnelOpening  TunnelState = "opening"
-	TunnelActive   TunnelState = "active"
-	TunnelClosing  TunnelState = "closing"
-	TunnelClosed   TunnelState = "closed"
+	TunnelNone    TunnelState = "none"
+	TunnelOpening TunnelState = "opening"
+	TunnelActive  TunnelState = "active"
+	TunnelClosing TunnelState = "closing"
+	TunnelClosed  TunnelState = "closed"
 )

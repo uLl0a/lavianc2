@@ -8,11 +8,11 @@ import (
 
 	"github.com/google/uuid"
 	adminv1 "github.com/uLl0a/lavianc2/gen/admin/v1"
+	"github.com/uLl0a/lavianc2/internal/beacons"
 	"github.com/uLl0a/lavianc2/internal/crypto"
 	"github.com/uLl0a/lavianc2/internal/events"
 	"github.com/uLl0a/lavianc2/internal/models"
 	"github.com/uLl0a/lavianc2/internal/profiles"
-	"github.com/uLl0a/lavianc2/internal/beacons"
 	"github.com/uLl0a/lavianc2/internal/storage"
 	"github.com/uLl0a/lavianc2/internal/tasks"
 	"golang.org/x/crypto/bcrypt"
@@ -34,6 +34,7 @@ type adminService struct {
 	beaconMgr    *beacons.Manager
 	repoRoot     string
 	caFile       string
+	wsAddr       string
 }
 
 func NewAdminService(
@@ -47,6 +48,7 @@ func NewAdminService(
 	beaconMgr *beacons.Manager,
 	repoRoot string,
 	caFile string,
+	wsAddr string,
 ) *adminService {
 	return &adminService{
 		store:        store,
@@ -59,6 +61,7 @@ func NewAdminService(
 		beaconMgr:    beaconMgr,
 		repoRoot:     repoRoot,
 		caFile:       caFile,
+		wsAddr:       wsAddr,
 	}
 }
 

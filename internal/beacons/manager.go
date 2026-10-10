@@ -49,7 +49,7 @@ func NewManager(ctx context.Context, store BeaconStore, implants ImplantLookup, 
 	// Al offline, notificar al resto del sistema (limpia sesiones/claves).
 	onOffline := func(id uuid.UUID) {
 		if bus != nil {
-			bus.Publish(ctx, events.Event{
+			bus.Publish(context.Background(), events.Event{
 				Topic:   events.TopicImplantDead,
 				Payload: id,
 			})
