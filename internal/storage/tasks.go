@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -17,6 +18,15 @@ type TaskRepo interface {
 	UpdateTaskStatus(ctx context.Context, id uuid.UUID, status models.TaskStatus, output []byte, errMsg string) error
 	ClaimPendingTasksForImplant(ctx context.Context, implantID uuid.UUID, limit int) ([]*models.Task, error)
 	GetTask(ctx context.Context, id uuid.UUID) (*models.Task, error)
+
+	// MarkStaleSentAsFailed marca 'failed' las tareas en estado 'sent' cuyo
+	// dispatched_at es anterior a staleAfter. Es el janitor de zombis: una
+	// tarea despachada que nunca recibió resultado queda en 'sent' para
+	// siempre si el implante murió antes de ejecutarla.
+	//
+	// Devuelve los IDs de las tareas marcadas para poder publicar el
+	// evento de completado (con status failed) en el bus.
+	MarkStaleSentAsFailed(ctx context.Context, staleAfter time.Duration) ([]uuid.UUID, error)
 }
 
 type taskRepo struct{ pool *pgxpool.Pool }
@@ -105,6 +115,37 @@ func (r *taskRepo) GetTask(ctx context.Context, id uuid.UUID) (*models.Task, err
 		return nil, fmt.Errorf("storage: get task: %w", err)
 	}
 	return t, nil
+}
+
+func (r *taskRepo) MarkStaleSentAsFailed(ctx context.Context, staleAfter time.Duration) ([]uuid.UUID, error) {
+	query := `
+		UPDATE tasks
+		SET status = 'failed',
+		    error = 'zombie: despachada sin resultado tras ' ||
+		            ceil(extract(epoch FROM (now() - dispatched_at))) || 's',
+		    completed_at = now()
+		WHERE status = 'sent'
+		  AND dispatched_at < now() - make_interval(secs => $1::double precision)
+		RETURNING id`
+
+	rows, err := r.pool.Query(ctx, query, staleAfter.Seconds())
+	if err != nil {
+		return nil, fmt.Errorf("storage: mark stale sent as failed: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("storage: scan stale task id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: rows error: %w", err)
+	}
+	return ids, nil
 }
 
 func scanTaskRow(row interface {

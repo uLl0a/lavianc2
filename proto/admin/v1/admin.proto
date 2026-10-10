@@ -34,7 +34,20 @@ service AdminService {
   // ---- Perfiles maleables ----
   rpc ListHTTPProfiles(google.protobuf.Empty) returns (ListHTTPProfilesResponse);
   rpc ListDNSProfiles(google.protobuf.Empty) returns (ListDNSProfilesResponse);
-  rpc ListQUICProfiles(google.protobuf.Empty) returns (ListQUICProfilesResponse); 
+  rpc ListQUICProfiles(google.protobuf.Empty) returns (ListQUICProfilesResponse);
+
+  // ---- Multi-Beacon Manager ----
+  rpc CreateBeaconGroup(CreateBeaconGroupRequest) returns (BeaconGroup);
+  rpc ListBeaconGroups(google.protobuf.Empty) returns (ListBeaconGroupsResponse);
+  rpc RegisterBeacon(RegisterBeaconRequest) returns (Beacon);
+  rpc GetBeacon(GetBeaconRequest) returns (Beacon);
+  rpc ListBeacons(google.protobuf.Empty) returns (ListBeaconsResponse);
+  rpc SetBeaconProfile(SetBeaconProfileRequest) returns (Beacon);
+  rpc StartBeacon(BeaconControlRequest) returns (google.protobuf.Empty);
+  rpc StopBeacon(BeaconControlRequest) returns (google.protobuf.Empty);
+  rpc SubmitDynamicPayload(SubmitDynamicPayloadRequest) returns (google.protobuf.Empty);
+  rpc OpenTunnel(BeaconControlRequest) returns (google.protobuf.Empty);
+  rpc CloseTunnel(BeaconControlRequest) returns (google.protobuf.Empty);
 }
 
 message Operator {
@@ -190,4 +203,59 @@ message ListDNSProfilesResponse {
 
 message ListQUICProfilesResponse {
   repeated ProfileInfo profiles = 1;
+}
+// ---- Multi-Beacon Manager ----
+message BeaconGroup {
+  string id = 1;
+  string name = 2;
+  string profile = 3; // "short-haul" | "long-haul"
+}
+
+message CreateBeaconGroupRequest {
+  string name = 1;
+  string profile = 2;
+}
+
+message ListBeaconGroupsResponse {
+  repeated BeaconGroup groups = 1;
+}
+
+message Beacon {
+  string id = 1;
+  string group_id = 2;
+  string name = 3;
+  string profile = 4;      // "short-haul" | "long-haul"
+  string state = 5;        // online|degraded|offline|admin-stop|internal-err
+  int32  fail_streak = 6;
+  int32  max_fails = 7;
+  google.protobuf.Timestamp last_check_in = 8;
+}
+
+message RegisterBeaconRequest {
+  string name = 1;
+  string profile = 2;
+  string group_id = 3;     // opcional
+}
+
+message GetBeaconRequest {
+  string id = 1;
+}
+
+message ListBeaconsResponse {
+  repeated Beacon beacons = 1;
+}
+
+message SetBeaconProfileRequest {
+  string id = 1;
+  string profile = 2;
+}
+
+message BeaconControlRequest {
+  string id = 1;
+}
+
+message SubmitDynamicPayloadRequest {
+  string beacon_id = 1;
+  string kind = 2;         // "bof" | "assembly" | "hvnc"
+  bytes  data = 3;
 }

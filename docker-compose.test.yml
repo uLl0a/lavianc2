@@ -1,0 +1,100 @@
+# Entorno de pruebas aislado que emula un despliegue real del C2.
+# - red interna 'c2net' (solo estos contenedores se ven entre sí)
+# - 'db': PostgreSQL con las migraciones
+# - 'teamserver': el binario del server compilado en el host
+# - 'target1': host "objetivo" con alpine corriendo el implant (beacon)
+#
+# Uso:
+#   docker compose -f docker-compose.test.yml up --build -d
+#   docker compose -f docker-compose.test.yml logs -f teamserver
+#   docker compose -f docker-compose.test.yml down -v
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: rtc2
+      POSTGRES_PASSWORD: rtc2
+      POSTGRES_DB: rtc2
+    networks:
+      - c2net
+    volumes:
+      - pgdata_test:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rtc2 -d rtc2"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  teamserver:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+      args:
+        BINARY: bin/server
+    image: lavianc2-teamserver:test
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      RTC2_DB_DSN: postgres://rtc2:rtc2@db:5432/rtc2?sslmode=disable
+      RTC2_GRPC_ADDR: ":9443"
+      RTC2_HTTPS_ADDR: ":8443"
+      RTC2_DNS_ADDR: ":5353"
+      RTC2_QUIC_ADDR: ":8443"
+      RTC2_WS_ADDR: ":9444"
+      RTC2_DNS_DOMAIN: c2.example.com
+      RTC2_LOG: debug
+      # El builder de implantes compila en el server: necesita el repo y
+      # cache de módulos montados.
+      GOPATH: /go
+      GOCACHE: /go-cache
+    volumes:
+      # Repo montado para que el builder (go build) tenga go.mod, deps y
+      # el template del implant. Solo lectura + caches de escritura.
+      - ./go.mod:/app/go.mod:ro
+      - ./go.sum:/app/go.sum:ro
+      - ./internal:/app/internal:ro
+      - ./gen:/app/gen:ro
+      - ./cmd:/app/cmd:ro
+      - gocache:/go-cache
+      - gopath:/go
+      # el builder escribe en .build/ y el binario de salida
+      - ./.build:/app/.build
+      - ./out:/app/out
+    working_dir: /app
+    networks:
+      - c2net
+    ports:
+      # Solo gRPC admin expuesto a localhost del host para poder compilar
+      # implantes con el CLI (el builder corre en el server). El tráfico
+      # C2 real (implant→HTTPS/DNS/QUIC/WS) NO se expone: va por c2net.
+      - "127.0.0.1:9943:9443"
+    # El tráfico C2 circula por la red interna 'c2net'. Para operar el
+    # manager desde el host usa scripts/test-in-docker.sh.
+
+  target1:
+    image: alpine:3.20
+    depends_on:
+      - teamserver
+    networks:
+      - c2net
+    command:
+      - /bin/sh
+      - -c
+      - |
+        echo "target1 listo. El implant se copia y ejecuta vía 'docker cp' + exec."
+        sleep infinity
+    # El binario del implant se inyecta con:
+    #   docker cp implant_linux_amd64_XXX target1:/tmp/implant
+    #   docker exec target1 /tmp/implant   (con RTC2_DEBUG si se quiere log)
+
+networks:
+  c2net:
+    driver: bridge
+
+volumes:
+  pgdata_test:
+  gocache:
+  gopath:

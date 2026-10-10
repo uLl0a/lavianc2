@@ -71,6 +71,7 @@ func (s *adminService) BuildImplant(
 		TargetArch:      builder.TargetArch(req.TargetArch),
 		Format:          builder.OutputFormat(req.Format),
 		ListenerURL:     req.ListenerUrl,
+		WSURL:           deriveWSURL(req.ListenerUrl),
 		ProfileName:     req.ProfileName,
 		ServerPubKey:    s.serverKeys.PublicKeyBase64(),
 		CACertPEMBase64: caB64,
@@ -178,4 +179,17 @@ func validateListenerURL(raw string) error {
 		return fmt.Errorf("esquema %q no soportado", u.Scheme)
 	}
 	return nil
+}
+
+// deriveWSURL construye la URL del túnel WebSocket a partir del ListenerURL
+// del build: mismo host, esquema wss, y el puerto/path del listener WS.
+// Por defecto asume el listener WS en el puerto 9444 con path /ws/tunnel.
+func deriveWSURL(listenerURL string) string {
+	u, err := url.Parse(listenerURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	host := u.Hostname()
+	ws := &url.URL{Scheme: "wss", Host: host + ":9444", Path: "/ws/tunnel"}
+	return ws.String()
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	adminv1 "github.com/uLl0a/lavianc2/gen/admin/v1"
+	"github.com/uLl0a/lavianc2/internal/beacons"
 	"github.com/uLl0a/lavianc2/internal/crypto"
 	"github.com/uLl0a/lavianc2/internal/events"
 	"github.com/uLl0a/lavianc2/internal/models"
@@ -56,6 +57,7 @@ type Config struct {
 	DNSProfiles  *profiles.DNSRegistry
 	QUICProfiles *profiles.QUICRegistry
 	ServerKeys   *crypto.ServerKeyStore
+	BeaconMgr    *beacons.Manager
 
 	RepoRoot string
 }
@@ -119,6 +121,7 @@ func NewServer(cfg Config, log *slog.Logger) (*Server, error) {
 		cfg.DNSProfiles,
 		cfg.QUICProfiles,
 		cfg.ServerKeys,
+		cfg.BeaconMgr,
 		cfg.RepoRoot,
 		cfg.CAFile,
 	)
@@ -331,6 +334,23 @@ var methodRequirements = map[string]string{
 	"/admin.v1.AdminService/ListQUICProfiles": "viewer",
 	"/admin.v1.AdminService/StreamTaskEvents": "viewer",
 	"/admin.v1.AdminService/StreamAudit":      "viewer",
+
+	// Multi-Beacon Manager
+	"/admin.v1.AdminService/ListBeacons":     "viewer",
+	"/admin.v1.AdminService/GetBeacon":       "viewer",
+	"/admin.v1.AdminService/ListBeaconGroups": "viewer",
+
+	// Operator-or-higher: control y payloads dinámicos
+	"/admin.v1.AdminService/RegisterBeacon":      "operator",
+	"/admin.v1.AdminService/SetBeaconProfile":    "operator",
+	"/admin.v1.AdminService/StartBeacon":         "operator",
+	"/admin.v1.AdminService/StopBeacon":          "operator",
+	"/admin.v1.AdminService/SubmitDynamicPayload": "operator",
+	"/admin.v1.AdminService/OpenTunnel":          "operator",
+	"/admin.v1.AdminService/CloseTunnel":         "operator",
+
+	// Admin-only: gestión de grupos
+	"/admin.v1.AdminService/CreateBeaconGroup": "admin",
 }
 
 // authorizeByRoleInterceptor compara el rol del contexto con el mínimo

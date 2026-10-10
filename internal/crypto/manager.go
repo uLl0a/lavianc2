@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -36,10 +37,14 @@ type SessionCrypto struct {
 //
 // El `sessionKey` (ej: "a1b2c3...") actúa como contexto de HKDF y garantiza
 // que dos sesiones con el mismo par de claves produzcan claves distintas.
+//
+// rekeyEvery indica cada cuántos mensajes rotar las claves. 0 selecciona
+// DefaultRekeyEvery.
 func NewSessionCrypto(
 	serverPriv *ecdh.PrivateKey,
 	implantPub *ecdh.PublicKey,
 	sessionKey string,
+	rekeyEvery uint64,
 ) (*SessionCrypto, error) {
 	if serverPriv == nil || implantPub == nil {
 		return nil, errors.New("crypto: claves ECDH requeridas")
@@ -63,8 +68,19 @@ func NewSessionCrypto(
 	return &SessionCrypto{
 		c2ToBeacon: c2ToBeacon,
 		beaconToC2: beaconToC2,
-		rekeyEvery: 1000,
+		rekeyEvery: normalizeRekeyEvery(rekeyEvery),
 	}, nil
+}
+
+// DefaultRekeyEvery es la rotación por defecto si el caller no la fija.
+const DefaultRekeyEvery = 1000
+
+// normalizeRekeyEvery devuelve un intervalo de rekey válido (>0).
+func normalizeRekeyEvery(n uint64) uint64 {
+	if n == 0 {
+		return DefaultRekeyEvery
+	}
+	return n
 }
 
 // NewSessionCryptoAsBeacon crea una sesión criptográfica desde el punto de
@@ -79,6 +95,7 @@ func NewSessionCryptoAsBeacon(
 	implantPriv *ecdh.PrivateKey,
 	serverPub *ecdh.PublicKey,
 	sessionKey string,
+	rekeyEvery uint64,
 ) (*SessionCrypto, error) {
 	if implantPriv == nil || serverPub == nil {
 		return nil, errors.New("crypto: claves ECDH requeridas")
@@ -102,7 +119,7 @@ func NewSessionCryptoAsBeacon(
 	return &SessionCrypto{
 		c2ToBeacon: c2ToBeacon,
 		beaconToC2: beaconToC2,
-		rekeyEvery: 1000,
+		rekeyEvery: normalizeRekeyEvery(rekeyEvery),
 	}, nil
 }
 
@@ -113,9 +130,7 @@ func NewSessionCryptoFromKeys(c2ToBeacon, beaconToC2 []byte, msgCount, rekeyEver
 	if len(c2ToBeacon) != KeySize || len(beaconToC2) != KeySize {
 		return nil, errors.New("crypto: claves deben ser de 32 bytes")
 	}
-	if rekeyEvery == 0 {
-		rekeyEvery = 1000
-	}
+	rekeyEvery = normalizeRekeyEvery(rekeyEvery)
 	return &SessionCrypto{
 		c2ToBeacon: c2ToBeacon,
 		beaconToC2: beaconToC2,
@@ -289,22 +304,32 @@ type SessionCryptoStore struct {
 	// server. Solo aplica al server.
 	pendingRekeys map[uuid.UUID]*ecdh.PrivateKey
 
+	// pendingRekeySince registra cuándo se inició cada rekey pendiente
+	// para expirar los que el implante nunca responde.
+	pendingRekeySince map[uuid.UUID]time.Time
+
 	// Persistencia opcional
 	repo SessionKeyRepo
 }
 
+// PendingRekeyTTL es el tiempo máximo que un rekey puede quedar pendiente
+// (esperando la respuesta del implante) antes de expirar.
+const PendingRekeyTTL = 2 * time.Minute
+
 func NewSessionCryptoStore() *SessionCryptoStore {
 	return &SessionCryptoStore{
-		sessions:      make(map[uuid.UUID]*SessionCrypto),
-		pendingRekeys: make(map[uuid.UUID]*ecdh.PrivateKey),
+		sessions:          make(map[uuid.UUID]*SessionCrypto),
+		pendingRekeys:     make(map[uuid.UUID]*ecdh.PrivateKey),
+		pendingRekeySince: make(map[uuid.UUID]time.Time),
 	}
 }
 
 func NewSessionCryptoStoreWithRepo(repo SessionKeyRepo) *SessionCryptoStore {
 	return &SessionCryptoStore{
-		sessions:      make(map[uuid.UUID]*SessionCrypto),
-		pendingRekeys: make(map[uuid.UUID]*ecdh.PrivateKey),
-		repo:          repo,
+		sessions:          make(map[uuid.UUID]*SessionCrypto),
+		pendingRekeys:     make(map[uuid.UUID]*ecdh.PrivateKey),
+		pendingRekeySince: make(map[uuid.UUID]time.Time),
+		repo:              repo,
 	}
 }
 
@@ -385,16 +410,48 @@ func (s *SessionCryptoStore) Save(ctx context.Context, implantID uuid.UUID) erro
 
 func (s *SessionCryptoStore) SetPendingRekey(implantID uuid.UUID, ephPriv *ecdh.PrivateKey) {
 	s.mu.Lock()
+	// Expira el rekey anterior si seguía pendiente (el implante no
+	// respondió): la ephPriv vieja se descarta y se reemplaza.
+	if _, ok := s.pendingRekeySince[implantID]; ok {
+		delete(s.pendingRekeys, implantID)
+	}
 	s.pendingRekeys[implantID] = ephPriv
+	s.pendingRekeySince[implantID] = time.Now()
 	s.mu.Unlock()
 }
 
+// TakePendingRekey devuelve la ephPriv pendiente de un rekey si existe y
+// no ha expirado; en cualquier caso la elimina del store. Un rekey
+// expirado devuelve nil y el handler lo tratará como "sin eph pendiente",
+// forzando un rekey nuevo en el siguiente pull.
 func (s *SessionCryptoStore) TakePendingRekey(implantID uuid.UUID) *ecdh.PrivateKey {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	eph := s.pendingRekeys[implantID]
+	if since, ok := s.pendingRekeySince[implantID]; ok && time.Since(since) > PendingRekeyTTL {
+		eph = nil // expirado: descartar la ephPriv vieja
+	}
 	delete(s.pendingRekeys, implantID)
+	delete(s.pendingRekeySince, implantID)
 	return eph
+}
+
+// ExpirePendingRekeys purga los rekeys pendientes que superan el TTL.
+// Debe llamarse periódicamente (p. ej. desde el janitor) para que los
+// rekeys huérfanos no se acumulen si el implante nunca responde y nadie
+// vuelve a llamar a Set/Take.
+func (s *SessionCryptoStore) ExpirePendingRekeys() []uuid.UUID {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var expired []uuid.UUID
+	for id, since := range s.pendingRekeySince {
+		if time.Since(since) > PendingRekeyTTL {
+			delete(s.pendingRekeys, id)
+			delete(s.pendingRekeySince, id)
+			expired = append(expired, id)
+		}
+	}
+	return expired
 }
 
 func (s *SessionCryptoStore) List() []uuid.UUID {

@@ -1,0 +1,20 @@
+# Imagen del team server para pruebas. Basada en golang (no alpine puro)
+# porque el builder de implantes ejecuta `go build` EN EL SERVER.
+# El binario se compila en el host y se copia; los certs también.
+FROM golang:1.27-alpine
+
+ARG BINARY=bin/server
+RUN apk add --no-cache ca-certificates libc6-compat
+WORKDIR /app
+
+COPY certs/ ./certs/
+COPY ${BINARY} ./server
+
+# Go toolchain para el builder de implantes (go build en el server)
+ENV PATH="/usr/local/go/bin:$PATH" \
+    GOPATH="/go" \
+    GOCACHE="/go-cache"
+
+EXPOSE 9443 8443 5353 9444
+
+ENTRYPOINT ["/app/server"]

