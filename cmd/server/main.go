@@ -21,6 +21,7 @@ import (
 	"github.com/uLl0a/lavianc2/internal/models"
 	"github.com/uLl0a/lavianc2/internal/profiles"
 	"github.com/uLl0a/lavianc2/internal/protocol"
+	"github.com/uLl0a/lavianc2/internal/transfers"
 
 	"github.com/uLl0a/lavianc2/internal/sessions"
 	"github.com/uLl0a/lavianc2/internal/storage"
@@ -83,6 +84,13 @@ func main() {
 	beaconManager.Start(ctx)
 	log.Info("multi-beacon manager activo")
 
+	transferMgr, err := transfers.NewManager("./downloads", bus, log)
+	if err != nil {
+		log.Error("no se pudo crear transfer manager", "err", err)
+		os.Exit(1)
+	}
+	log.Info("transfer manager listo", "output_dir", "./downloads")
+
 	httpsID, err := ensureDefaultListener(
 		ctx, store,
 		"default-https",
@@ -106,6 +114,7 @@ func main() {
 		bus,
 		serverKeys,
 		beaconManager,
+		transferMgr,
 		cfg.TLSCertFile,
 		cfg.TLSKeyFile,
 		cfg.RekeyEvery,
@@ -146,6 +155,7 @@ func main() {
 		bus,
 		serverKeys,
 		beaconManager,
+		transferMgr,
 		cfg.RekeyEvery,
 		log,
 	)
@@ -188,6 +198,7 @@ func main() {
 		cfg.TLSCertFile,
 		cfg.TLSKeyFile,
 		beaconManager,
+		transferMgr,
 		cfg.RekeyEvery,
 		log,
 	)

