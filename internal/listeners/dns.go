@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/miekg/dns"
+	"github.com/uLl0a/lavianc2/internal/beacons"
 	"github.com/uLl0a/lavianc2/internal/crypto"
 	"github.com/uLl0a/lavianc2/internal/events"
 	"github.com/uLl0a/lavianc2/internal/models"
@@ -49,6 +50,8 @@ type DNSListener struct {
 	serverKeys *crypto.ServerKeyStore
 	serverPriv *ecdh.PrivateKey
 
+	beaconMgr *beacons.Manager
+
 	// Estado interno.
 	server *dns.Server
 	mu     sync.Mutex
@@ -82,6 +85,7 @@ func NewDNSListener(
 	registry *sessions.Registry,
 	bus *events.Bus,
 	serverKeys *crypto.ServerKeyStore,
+	beaconMgr *beacons.Manager,
 	rekeyEvery uint64,
 	log *slog.Logger,
 ) (*DNSListener, error) {
@@ -109,6 +113,7 @@ func NewDNSListener(
 		log:        log,
 		serverKeys: serverKeys,
 		serverPriv: serverKeys.PrivateKey(),
+		beaconMgr:  beaconMgr,
 		profile:    profile,
 		rekeyEvery: rekeyEvery,
 		router:     protocol.NewRouter(log),
@@ -537,6 +542,10 @@ func (l *DNSListener) handleTaskPullEnvelope(ctx context.Context, env *protocol.
 	sessionCrypto, ok := l.crypto.Get(ctx, implantID)
 	if !ok {
 		return nil, fmt.Errorf("dns task pull: sesion %s sin claves", implantID)
+	}
+
+	if l.beaconMgr != nil {
+		l.beaconMgr.TouchByImplant(implantID)
 	}
 
 	// Validar la autenticación del ciphertext (aunque hoy no usemos el plaintext).

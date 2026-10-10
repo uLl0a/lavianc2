@@ -19,9 +19,9 @@ import (
 	"github.com/uLl0a/lavianc2/internal/events"
 	"github.com/uLl0a/lavianc2/internal/listeners"
 	"github.com/uLl0a/lavianc2/internal/models"
-	"github.com/uLl0a/lavianc2/internal/protocol"
 	"github.com/uLl0a/lavianc2/internal/profiles"
-	
+	"github.com/uLl0a/lavianc2/internal/protocol"
+
 	"github.com/uLl0a/lavianc2/internal/sessions"
 	"github.com/uLl0a/lavianc2/internal/storage"
 	"github.com/uLl0a/lavianc2/internal/tasks"
@@ -79,6 +79,10 @@ func main() {
 	quicProfilesRegistry := profiles.NewQUICRegistry()
 	log.Info("perfiles QUIC cargados", "perfiles", quicProfilesRegistry.List())
 
+	beaconManager := beacons.NewManager(ctx, store.Beacons, store.Implants, bus, log)
+	beaconManager.Start(ctx)
+	log.Info("multi-beacon manager activo")
+
 	httpsID, err := ensureDefaultListener(
 		ctx, store,
 		"default-https",
@@ -101,6 +105,7 @@ func main() {
 		registry,
 		bus,
 		serverKeys,
+		beaconManager,
 		cfg.TLSCertFile,
 		cfg.TLSKeyFile,
 		cfg.RekeyEvery,
@@ -140,6 +145,7 @@ func main() {
 		registry,
 		bus,
 		serverKeys,
+		beaconManager,
 		cfg.RekeyEvery,
 		log,
 	)
@@ -181,6 +187,7 @@ func main() {
 		cfg.QUICProfile,
 		cfg.TLSCertFile,
 		cfg.TLSKeyFile,
+		beaconManager,
 		cfg.RekeyEvery,
 		log,
 	)
@@ -195,13 +202,6 @@ func main() {
 		}
 	}()
 	log.Info("listener QUIC activo", "addr", cfg.QUICAddr, "id", quicID)
-
-	// ---- Multi-Beacon Manager ----
-	// store.Implants actúa como lookup para adoptar implants reales como
-	// beacons gestionados (vinculación implant↔beacon).
-	beaconManager := beacons.NewManager(ctx, store.Beacons, store.Implants, bus, log)
-	beaconManager.Start(ctx)
-	log.Info("multi-beacon manager activo")
 
 	// ---- WS listener (túneles hVNC / streaming) ----
 	// La migración 0003 amplía listeners_type_check para aceptar

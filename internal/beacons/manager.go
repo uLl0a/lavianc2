@@ -74,32 +74,48 @@ func NewManager(ctx context.Context, store BeaconStore, implants ImplantLookup, 
 // adoptOrTouch adopta un implant como beacon o, si ya está adoptado, marca
 // su check-in (online + reset de racha).
 func (m *Manager) adoptOrTouch(ctx context.Context, implantID uuid.UUID) {
-	// Si ya está adoptado, TouchCheckIn basta.
-	if _, ok := m.Registry.ByImplant(implantID); ok {
-		m.Monitor.CheckIn(implantID)
+	if b, ok := m.Registry.ByImplant(implantID); ok {
+		m.Monitor.CheckIn(b.ID)
 		return
 	}
-	// Nuevo: resolver el implant para derivar nombre y perfil.
+
 	if m.implants == nil {
-		// Sin lookup, crear un beacon genérico asociado al implant.
-		if _, err := m.Registry.Adopt(implantID, "", "", 0); err != nil {
+		b, err := m.Registry.Adopt(implantID, "", "", 0)
+		if err != nil {
 			m.log.Warn("adopt: crear beacon genérico", "err", err)
+			return
 		}
-		m.Monitor.CheckIn(implantID)
+		m.Monitor.CheckIn(b.ID)
 		return
 	}
+
 	imp, err := m.implants.Get(ctx, implantID)
 	if err != nil || imp == nil {
 		m.log.Warn("adopt: implant no resoluble", "id", implantID, "err", err)
-		m.Monitor.CheckIn(implantID)
+		b, err := m.Registry.Adopt(implantID, "", "", 0)
+		if err == nil {
+			m.Monitor.CheckIn(b.ID)
+		}
 		return
 	}
-	if _, err := m.Registry.Adopt(implantID, imp.Hostname, imp.SessionKey, imp.SleepInterval); err != nil {
+
+	b, err := m.Registry.Adopt(implantID, imp.Hostname, imp.SessionKey, imp.SleepInterval)
+	if err != nil {
 		m.log.Warn("adopt: registrar beacon", "err", err)
+		return
 	}
-	m.Monitor.CheckIn(implantID)
+	m.Monitor.CheckIn(b.ID)
 	m.log.Info("implant adoptado como beacon",
-		"implant", implantID, "host", imp.Hostname, "sleep", imp.SleepInterval)
+		"implant", implantID, "beacon", b.ID,
+		"host", imp.Hostname, "sleep", imp.SleepInterval)
+}
+
+func (m *Manager) TouchByImplant(implantID uuid.UUID) {
+	b, ok := m.Registry.ByImplant(implantID)
+	if !ok {
+		return
+	}
+	m.Monitor.CheckIn(b.ID)
 }
 
 // Start arranca el monitor.

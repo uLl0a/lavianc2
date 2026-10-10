@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/quic-go/quic-go"
+	"github.com/uLl0a/lavianc2/internal/beacons"
 	"github.com/uLl0a/lavianc2/internal/crypto"
 	"github.com/uLl0a/lavianc2/internal/events"
 	"github.com/uLl0a/lavianc2/internal/models"
@@ -60,6 +61,8 @@ type QUICListener struct {
 	serverKeys *crypto.ServerKeyStore
 	serverPriv *ecdh.PrivateKey
 
+	beaconMgr *beacons.Manager
+
 	certFile string
 	keyFile  string
 
@@ -80,6 +83,7 @@ func NewQUICListener(
 	serverKeys *crypto.ServerKeyStore,
 	profileRegistry *profiles.QUICRegistry,
 	profileName, certFile, keyFile string,
+	beaconMgr *beacons.Manager,
 	rekeyEvery uint64,
 	log *slog.Logger,
 ) (*QUICListener, error) {
@@ -111,6 +115,7 @@ func NewQUICListener(
 		log:        log,
 		serverKeys: serverKeys,
 		serverPriv: serverKeys.PrivateKey(),
+		beaconMgr:  beaconMgr,
 		rekeyEvery: rekeyEvery,
 		profile:    profile,
 		router:     protocol.NewRouter(log),
@@ -533,6 +538,10 @@ func (l *QUICListener) handleTaskPullEnvelope(ctx context.Context, env *protocol
 	sessionCrypto, ok := l.crypto.Get(ctx, implantID)
 	if !ok {
 		return nil, fmt.Errorf("task pull: sesión %s sin claves", implantID)
+	}
+
+	if l.beaconMgr != nil {
+		l.beaconMgr.TouchByImplant(implantID)
 	}
 
 	// Validar la autenticación del ciphertext (aunque hoy no usemos el plaintext).

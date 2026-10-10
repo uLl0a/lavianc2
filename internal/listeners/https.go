@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/uLl0a/lavianc2/internal/beacons"
 	"github.com/uLl0a/lavianc2/internal/crypto"
 	"github.com/uLl0a/lavianc2/internal/events"
 	"github.com/uLl0a/lavianc2/internal/models"
@@ -45,6 +46,7 @@ type HTTPSListener struct {
 
 	profile    *profiles.Profile
 	serverKeys *crypto.ServerKeyStore
+	beaconMgr  *beacons.Manager
 
 	// Intervalo de rekey para las sesiones nuevas (0 = default).
 	rekeyEvery uint64
@@ -59,6 +61,7 @@ func NewHTTPSListener(
 	registry *sessions.Registry,
 	bus *events.Bus,
 	serverKeys *crypto.ServerKeyStore,
+	beaconMgr *beacons.Manager,
 	certFile, keyFile string,
 	rekeyEvery uint64,
 	log *slog.Logger,
@@ -92,6 +95,7 @@ func NewHTTPSListener(
 		bus:        bus,
 		log:        log,
 		serverKeys: serverKeys,
+		beaconMgr:  beaconMgr,
 		rekeyEvery: rekeyEvery,
 		serverPriv: serverKeys.PrivateKey(),
 		profile:    profile,
@@ -328,6 +332,10 @@ func (l *HTTPSListener) handleTaskPullEnvelope(ctx context.Context, env *protoco
 	sessionCrypto, ok := l.crypto.Get(ctx, implantID)
 	if !ok {
 		return nil, fmt.Errorf("task pull: sesión %s sin claves", implantID)
+	}
+
+	if l.beaconMgr != nil {
+		l.beaconMgr.TouchByImplant(implantID)
 	}
 
 	// Validar la autenticación del ciphertext (aunque hoy no usemos el plaintext).

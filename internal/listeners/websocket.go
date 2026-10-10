@@ -74,6 +74,13 @@ func NewWSListener(cfg WSListenerConfig) (*WSListener, error) {
 		certFile: cfg.CertFile,
 		keyFile:  cfg.KeyFile,
 	}
+
+	l.router.MustRegister(protocol.MsgTunnel, func(ctx context.Context, env *protocol.Envelope) (*protocol.Envelope, error) {
+		// Eco: devolvemos el mismo payload recibido. El cliente puede
+		// distinguir esto de un error, y sabemos que el frame llegó.
+		return protocol.NewEnvelope(protocol.MsgTunnel, env.Payload), nil
+	})
+
 	return l, nil
 }
 
